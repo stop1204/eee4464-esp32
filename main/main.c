@@ -14,6 +14,7 @@
 #include "esp_system.h"
 #include <sys/param.h>
 #include <time.h>
+#include "esp_netif_ip_addr.h"
 
 // ESP-IDF WiFi AP/Web config includes
 #include "esp_wifi.h"
@@ -26,6 +27,12 @@
 
 // API
 #include "cloudflare_api.h"
+
+#include "freertos/event_groups.h"
+
+// Global event group for WiFi connection
+EventGroupHandle_t wifi_event_group;
+const int WIFI_CONNECTED_BIT = BIT0;
 
 static const char *TAG = "wifi_setup";
 
@@ -46,8 +53,12 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
         ESP_LOGI(TAG, "WiFi Connected.");
+        // Optional: Set bit here if you want, but only set on IP_EVENT_STA_GOT_IP for real connection
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ESP_LOGI(TAG, "Got IP. WiFi connection SUCCESS!");
+        esp_netif_ip_info_t ip_info = ((ip_event_got_ip_t*)event_data)->ip_info;
+        ESP_LOGI(TAG, "Got IP Address: " IPSTR, IP2STR(&ip_info.ip));
+        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
         on_wifi_connected_notify();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         ESP_LOGI(TAG, "Disconnected. Retry...");
@@ -147,7 +158,7 @@ esp_err_t root_get_handler(httpd_req_t *req) {
     "d.innerHTML=list.map(ap=>`<button onclick='askpw(\"${ap.ssid}\")'>${ap.ssid} (${ap.rssi})</button>`).join('<br>');"
     "});"
     "function askpw(ssid){"
-    "let pw=prompt('Please enter password：', '');"
+    "let pw=prompt('Please enter password:', '');"
     "if(pw!=null){"
     "let f=document.createElement('form');"
     "f.method='POST'; f.action='/config';"
@@ -160,36 +171,43 @@ httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
 
-void wifi_setup(void) {
+// Forward declaration for softAP setup
+void setup_softap();
+void  register_device();
 
+void wifi_setup(void) {
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    // Create event group for WiFi connection
+    wifi_event_group = xEventGroupCreate();
 
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
             ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
         ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
 
-    esp_netif_create_default_wifi_ap();
+    esp_netif_create_default_wifi_sta();
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    wifi_config_t ap_config = {
-        .ap = {
-            .ssid = "ESP32_Group2",
-            .ssid_len = strlen("ESP32_Group2"),
-            .channel = 1,
-            .max_connection = 4,
-            .authmode = WIFI_AUTH_OPEN
-        },
-    };
+    // Enable WiFi config storage in flash (NVS)
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_FLASH));
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_LOGI(TAG, "Access Point started. Connect to 'ESP32_Group2'");
 
+    // Wait for connection with 15s timeout
+    if (xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(15000)) & WIFI_CONNECTED_BIT) {
+        ESP_LOGI(TAG, "WiFi connected within 15s, proceeding to register device.");
+        register_device();
+    } else {
+        ESP_LOGW(TAG, "WiFi not connected in 15s, switching to softAP mode.");
+        setup_softap();
+    }
+
+    // Start HTTP server for configuration
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     if (httpd_start(&server, &config) == ESP_OK) {
@@ -214,6 +232,28 @@ void wifi_setup(void) {
         };
         httpd_register_uri_handler(server, &scan);
     }
+}
+
+void setup_softap() {
+    wifi_config_t ap_config = {
+        .ap = {
+            .ssid = "ESP32_Group2",
+            .ssid_len = strlen("ESP32_Group2"),
+            .channel = 1,
+            //.password = "12345678",
+            .max_connection = 4,
+            .authmode = WIFI_AUTH_WPA_WPA2_PSK
+        },
+    };
+/*    if (strlen("12345678") == 0) {
+        ap_config.ap.authmode = WIFI_AUTH_OPEN;
+    }
+*/
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    ESP_LOGI(TAG, "SoftAP started. SSID: %s", "ESP32_Group2");
 }
 
 void print_chip_info(void)
@@ -290,7 +330,7 @@ void init(void)
     print_chip_info();
     // Set up Wi-Fi connection
     wifi_setup();
-    //register_device();
+    // register_device() is now called in wifi_setup() if STA connects in 15s
 }
 void end(void)
 {
