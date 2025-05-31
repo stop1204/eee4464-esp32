@@ -15,3 +15,4 @@ When you have completed the setup, you will be able to do more complex projects.
 1. [Standard Toolchain Setup for Linux and *macOS*](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/get-started/linux-macos-setup.html)
 2. [ESP WIFI](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/network/esp_wifi.html)
 3. [ESP LOG](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/log.html)
+4. [ESP32 Internal Temperature Sensor with ESP-IDF](https://esp32tutorials.com/esp32-internal-temperature-sensor-esp-idf/)

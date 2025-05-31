@@ -1,3 +1,4 @@
+
 /*
  * SPDX-FileCopyrightText: 2010-2022 Espressif Systems (Shanghai) CO LTD
  *
@@ -24,17 +25,58 @@
 #include "esp_netif.h"
 #include "esp_http_server.h"
 #include "cJSON.h"
-
+#include "driver/gpio.h"
+#include "driver/adc.h"
+#include "esp_sntp.h"
 // API
 #include "cloudflare_api.h"
 
 #include "freertos/event_groups.h"
+#include "driver/temperature_sensor.h"
+
+// define GPIO
+#define LED_STATUS_GPIO GPIO_NUM_5
+#define SOIL_SENSOR_ADC ADC1_CHANNEL_0 // GPIO36
+#define SOIL_SENSOR_ADC_WIDTH ADC_WIDTH_BIT_12
+#define SOIL_SENSOR_ADC_ATTEN ADC_ATTEN_DB_11 // 11dB attenuation for 3.3V range
+#define SOIL_RELAY_GPIO GPIO_NUM_25
+#define TEST_BUTTON_GPIO GPIO_NUM_4 // GPIO0 for test button
+
+#define MAX_CONTROLS_BUFFER 256
+
 
 // Global event group for WiFi connection
 EventGroupHandle_t wifi_event_group;
 const int WIFI_CONNECTED_BIT = BIT0;
 
 static const char *TAG = "wifi_setup";
+static char controls_buf[MAX_CONTROLS_BUFFER];
+
+// register device information
+char url_control[128];
+const int device_id = 4464001; // device unique ID
+const char* device_name = "Device_001";
+const char* device_type = "ESP32";
+
+struct Sensor {
+  int id;
+  const char* name;
+  const char* type;
+};
+struct Sensor  sensors[] = {
+	{device_id * 100 + 1,"Example Temperature Sensor","Temperature"},
+	{device_id * 100 + 2,"Example Humidity Sensor" ,"Humidity"},
+	{device_id * 100 + 3,"Soil Moisture Sensor" ,"Moisture"},
+	{device_id * 100 + 4,"Soil Replay Sensor" ,"Replay"}
+};
+const int sensor_count = sizeof(sensors) / sizeof(sensors[0]);
+
+// soil  moisture sensor configuration
+int dry_threshold = 3000;
+int wet_threshold = 2000;
+bool pump_on = false;
+
+
 
 // predeclaration of functions
 void on_wifi_connected_notify(void) {
@@ -200,8 +242,8 @@ void wifi_setup(void) {
 
     // Wait for connection with 15s timeout
     if (xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(15000)) & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "WiFi connected within 15s, proceeding to register device.");
-        register_device();
+        ESP_LOGI(TAG, "WiFi connected within 15s.");
+        /* Device registration now handled in main_loop_task to avoid main‑task stack overflow */
     } else {
         ESP_LOGW(TAG, "WiFi not connected in 15s, switching to softAP mode.");
         setup_softap();
@@ -291,19 +333,18 @@ void print_chip_info(void)
 void register_device(void)
 {
     // Register device on startup
-    int device_id = 4464001; // example device unique ID
-    const char* device_name = "Device_001";
-    const char* device_type = "ESP32";
+    // int device_id = 4464001; // example device unique ID
+
 
     /*    int sensor_id = device_id * 1000 + 1; // e.g., 4464001001 for sensor 1
     const char* sensor_name = "Sample Sensor";
     const char* sensor_type = "Temperature";
     */
     // Register sensors array
-    int sensor_count = 2;
-    int sensor_ids[] = {device_id * 1000 + 1, device_id * 1000 + 2};
-    const char* sensor_names[] = {"Example Temperature Sensor", "Example Humidity Sensor"};
-    const char* sensor_types[] = {"Temperature", "Humidity"};
+    // int sensor_count = 2;
+    // int sensor_ids[] = {device_id * 1000 + 1, device_id * 1000 + 2};
+    // const char* sensor_names[] = {"Example Temperature Sensor", "Example Humidity Sensor"};
+    // const char* sensor_types[] = {"Temperature", "Humidity"};
 
     // Register callback after successful POST
     cloudflare_api_on_data_sent(on_post_success);
@@ -314,9 +355,9 @@ void register_device(void)
 
     // Register the sensor
     for (int i = 0; i < sensor_count; i++) {
-        int sensor_id = sensor_ids[i];
-        const char* sensor_name = sensor_names[i];
-        const char* sensor_type = sensor_types[i];
+        int sensor_id = sensors[i].id;;
+        const char* sensor_name = sensors[i].name;
+        const char* sensor_type = sensors[i].type;
 
         // Register each sensor
         cloudflare_register_sensor(sensor_id, device_id, sensor_name, sensor_type);
@@ -324,13 +365,95 @@ void register_device(void)
     }
 
 }
+// soil moisture sensor
+int read_soil_sensor() {
+    return adc1_get_raw(ADC1_CHANNEL_0); //
+}
+void set_soil_relay(bool on) {
+    gpio_set_level(SOIL_RELAY_GPIO, on ? 1 : 0);
+}
+void update_threshold_from_cloud() {
+    char buffer[256];
+    if (cloudflare_get_json(url_control, buffer, sizeof(buffer)) == ESP_OK) {
+        cJSON *root = cJSON_Parse(buffer);
+        bool found = false;
+        if (root) {
+        cJSON *entry = NULL;
+        cJSON_ArrayForEach(entry, root) {
+            cJSON *id_item  = cJSON_GetObjectItem(entry, "device_id");
+            if (!cJSON_IsNumber(id_item)) {
+                ESP_LOGW("Control", "Skip entry without numeric device_id");
+                continue;
+            }
+            if (id_item->valueint != device_id) {
+                continue;   // not for this device
+            }
+
+            cJSON *dry_item = cJSON_GetObjectItem(entry, "dry_threshold");
+            cJSON *wet_item = cJSON_GetObjectItem(entry, "wet_threshold");
+            if (cJSON_IsNumber(dry_item) && cJSON_IsNumber(wet_item)) {
+                dry_threshold = dry_item->valueint;
+                wet_threshold = wet_item->valueint;
+                ESP_LOGI("Control", "Thresholds pulled from cloud: dry=%d, wet=%d",
+                         dry_threshold, wet_threshold);
+                found = true;
+            } else {
+                ESP_LOGW("Control", "Entry for device lacks numeric thresholds");
+            }
+            break;  // processed matching entry, exit loop
+        }
+            cJSON_Delete(root);
+        }
+        if (!found) {
+            // Post default threshold if not found in cloud
+            char post_body[128];
+            snprintf(post_body, sizeof(post_body),
+                     "{\"device_id\":%d,\"dry_threshold\":%d,\"wet_threshold\":%d}",
+                     device_id, dry_threshold, wet_threshold);
+            cloudflare_post_json("/api/controls", post_body);
+            ESP_LOGI("Control", "Threshold not found. Posted default to cloud.");
+        }
+    }
+}
+
+void init_time() {
+    sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    sntp_setservername(0, "pool.ntp.org");
+    sntp_init();
+}
+
 void init(void)
 {
+
+    gpio_reset_pin(LED_STATUS_GPIO);
+    gpio_set_direction(LED_STATUS_GPIO, GPIO_MODE_OUTPUT);
+    snprintf(url_control, sizeof(url_control), "/api/controls?device_id=%d", device_id);
+
     ESP_LOGI("Initial","Welcome!");
     print_chip_info();
     // Set up Wi-Fi connection
     wifi_setup();
     // register_device() is now called in wifi_setup() if STA connects in 15s
+
+    // ###################################################################################
+    // any use internet functions should be called after Wi-Fi is connected
+    // ###################################################################################
+
+    init_time();
+
+    // soil  moisture sensor config.
+    adc1_config_width(SOIL_SENSOR_ADC_WIDTH);
+    adc1_config_channel_atten(SOIL_SENSOR_ADC, SOIL_SENSOR_ADC_ATTEN); // GPIO36
+    gpio_reset_pin(SOIL_RELAY_GPIO);
+    gpio_set_direction(SOIL_RELAY_GPIO, GPIO_MODE_OUTPUT);
+    gpio_set_drive_capability(SOIL_RELAY_GPIO, GPIO_DRIVE_CAP_3);  // Max drive strength
+    gpio_set_level(SOIL_RELAY_GPIO, 0);  // Set initial state to inactive (assuming active-low relay)
+
+    // Setup test button GPIO
+    gpio_reset_pin(TEST_BUTTON_GPIO);
+    gpio_set_direction(TEST_BUTTON_GPIO, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(TEST_BUTTON_GPIO, GPIO_PULLUP_ONLY);
+
 }
 void end(void)
 {
@@ -343,14 +466,181 @@ void end(void)
     esp_restart();
 }
 
+
+// --------------------------- Button Interrupt/Task Implementation -----------------------------
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
+
+static TaskHandle_t button_task_handle = NULL;
+
+// Manual relay state
+static bool relay_state = false;
+
+// Button task to handle relay toggling
+void button_task(void* arg) {
+    while (1) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        // 按下立即處理邏輯
+        relay_state = !relay_state;
+        pump_on = relay_state;
+        set_soil_relay(relay_state);
+        char control_json[255];
+        if (pump_on){
+           snprintf(control_json, sizeof(control_json), "{\"control_id\":%d,\"state\":\"on\"}", sensors[3].id);
+        } else {
+            snprintf(control_json, sizeof(control_json), "{\"control_id\":%d,\"state\":\"off\"}", sensors[3].id);
+        }
+        cloudflare_post_json("/api/controls", control_json);
+        ESP_LOGW("Test Button", "Manual toggle relay to %s", relay_state ? "ON" : "OFF");
+    }
+}
+
+// ISR handler for test button
+static void IRAM_ATTR test_button_isr_handler(void* arg) {
+    xTaskNotifyFromISR(button_task_handle, 0, eNoAction, NULL);
+}
+
+// Helper to setup test button interrupt
+static void setup_test_button_interrupt(void) {
+    gpio_config_t io_conf = {
+        .intr_type = GPIO_INTR_NEGEDGE,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = 1,
+        .pin_bit_mask = 1ULL << TEST_BUTTON_GPIO
+    };
+    gpio_config(&io_conf);
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add(TEST_BUTTON_GPIO, test_button_isr_handler, NULL);
+}
+
+// --------------------- main application loop task ------------------------
+static void main_loop_task(void *arg)
+{
+    ESP_LOGI("main_loop", "Task stack high‑water mark at start: %u words",
+             uxTaskGetStackHighWaterMark(NULL));
+
+    /* Wait until WiFi is connected, then register device & sensors */
+    xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
+    register_device();
+
+    // === Original body of app_main() starting after init(); ===
+    // Wait for time to sync
+    time_t now = 0;
+    struct tm timeinfo = { 0 };
+    while (timeinfo.tm_year < (2020 - 1900)) {
+        time(&now);
+        localtime_r(&now, &timeinfo);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    ESP_LOGI("Time", "Time synced: %s", asctime(&timeinfo));
+
+    update_threshold_from_cloud();
+
+    static int soil_read_counter = 0;
+    static int cloud_status_counter = 0;
+
+    // Setup button task and ISR
+    xTaskCreate(button_task, "button_task", 2048, NULL, 10, &button_task_handle);
+    setup_test_button_interrupt();
+
+    static bool led_on = false;
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(500)); // Delay for 0.5 seconds
+
+        // Toggle status LED
+        led_on = !led_on;
+        gpio_set_level(LED_STATUS_GPIO, led_on);
+
+        if (++cloud_status_counter >= 4) { // Post status every 2 seconds
+            // get controls from cloud , compare updated_at timestamp
+            if (cloudflare_get_json(url_control, controls_buf, sizeof(controls_buf)) == ESP_OK) {
+                // Debug: print raw response content
+                ESP_LOGI("DEBUG", "Raw response content: %s", controls_buf);
+                cJSON *root = cJSON_Parse(controls_buf);
+                if (root == NULL) {
+                    ESP_LOGE("DEBUG", "Failed to parse response JSON");
+                } else {
+                    if (!cJSON_IsArray(root)) {
+                        ESP_LOGE("DEBUG", "Expected JSON array but got something else");
+                        cJSON_Delete(root);
+                    } else {
+                        int array_size = cJSON_GetArraySize(root);
+                        for (int i = 0; i < array_size; i++) {
+                            cJSON *item = cJSON_GetArrayItem(root, i);
+                            cJSON *control_id_json = cJSON_GetObjectItem(item, "control_id");
+                            cJSON *state_json = cJSON_GetObjectItem(item, "state");
+                            if (control_id_json && state_json && cJSON_IsNumber(control_id_json) && cJSON_IsString(state_json)) {
+                                int control_id = control_id_json->valueint;
+                                const char* state = state_json->valuestring;
+                                // if control_id matches sensors[3].id
+                                if (control_id == sensors[3].id) {
+                                    if (strcmp(state, "on") == 0 && !pump_on) {
+                                        set_soil_relay(true);
+                                        pump_on = true;
+                                        relay_state = true;
+                                        ESP_LOGI("ControlSync", "Pump turned ON from cloud control.");
+                                    } else if (strcmp(state, "off") == 0 && pump_on) {
+                                        set_soil_relay(false);
+                                        pump_on = false;
+                                        relay_state = false;
+                                        ESP_LOGI("ControlSync", "Pump turned OFF from cloud control.");
+                                    }
+                                }
+                            }
+                        }
+                        cJSON_Delete(root);
+                    }
+                }
+            }
+            cloud_status_counter = 0;
+        }
+
+        // Read soil moisture sensor value every 3 seconds    500 ticks*6
+        if (++soil_read_counter >= 6) {
+            // Read soil moisture sensor value
+            int moisture = read_soil_sensor();
+            // Post soil data to cloud
+            char soil_data[64];
+
+            if (moisture < 200 || moisture > 4000) {
+                ESP_LOGE("Soil Moisture Sensor", "Invalid moisture value: %d", moisture);
+                // Skip this iteration if the value is out of range
+            } else {
+                snprintf(soil_data, sizeof(soil_data), "{\"moisture\":%d}", moisture);
+                cloudflare_post_sensor_data(sensors[2].id, device_id, soil_data);
+                if (!pump_on && moisture > dry_threshold ) {
+                    // post relay status to cloud
+                    set_soil_relay(true);
+                    char control_json[255];
+                    snprintf(control_json, sizeof(control_json),
+                             "{\"control_id\":%d,\"state\":\"on\"}", sensors[3].id);
+                    cloudflare_post_json("/api/controls", control_json);
+                    ESP_LOGW("Soil Moisture Sensor","Soil dry, pump ON\n");
+                    pump_on = true;
+                    relay_state = true;
+                } else if (pump_on && moisture < wet_threshold ) {
+                    set_soil_relay(false);
+                    char control_json[255];
+                    // only post at this point
+                    snprintf(control_json, sizeof(control_json),
+                             "{\"control_id\":%d,\"state\":\"off\"}", sensors[3].id);
+                    cloudflare_post_json("/api/controls", control_json);
+                    pump_on = false;
+                    relay_state = false;
+                    ESP_LOGW("Soil Moisture Sensor","Soil wet, pump OFF\n");
+                }
+            }
+            soil_read_counter = 0; // Reset counter after reading
+        }
+    }
+}
+
 void app_main(void)
 {
     init();
-
-
-
-
-   // end();
+    /* Run main loop in a separate task with a larger stack to avoid main‑task overflow */
+    xTaskCreatePinnedToCore(main_loop_task, "main_loop", 16384, NULL, 5, NULL, 0);
+    vTaskDelete(NULL);   // main task can exit now
 }
-
 
