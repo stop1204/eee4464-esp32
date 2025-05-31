@@ -487,20 +487,18 @@ void button_task(void* arg) {
         relay_state = !relay_state;
         pump_on = relay_state;
         set_soil_relay(relay_state);
-        char control_json[255];
-        char message_json[255];
-        if (pump_on){
-           snprintf(control_json, sizeof(control_json), "{\"control_id\":%d,\"state\":\"on\"}", sensors[3].id);
-           snprintf(message_json, sizeof(message_json),"{\"control_id\":%d,\"state\":\"on\",\"device_id\":%d,\"from_source\":%s}",
-            sensors[3].id, device_id, sensors[3].name);
-        } else {
-            snprintf(control_json, sizeof(control_json), "{\"control_id\":%d,\"state\":\"off\"}", sensors[3].id);
-            snprintf(message_json, sizeof(message_json),"{\"control_id\":%d,\"state\":\"off\",\"device_id\":%d,\"from_source\":%s}",
-            sensors[3].id, device_id, sensors[3].name);
-        }
-        cloudflare_post_json("/api/controls", control_json);
-        cloudflare_post_json("/api/messages", message_json);
+        char control_url[50];
 
+        snprintf(control_url, sizeof(control_url), "/api/controls?control_id=%d", sensors[3].id);
+        if (pump_on){
+            cloudflare_post_message(device_id,sensors[3].id,"on",sensors[3].name);
+            cloudflare_put_json(control_url, "{\"state\":\"on\"}");
+
+        } else {
+            cloudflare_put_json(control_url, "{\"state\":\"off\"}");
+
+            cloudflare_post_message(device_id,sensors[3].id,"off",sensors[3].name);
+        }
         ESP_LOGW("Test Button", "Manual toggle relay to %s", relay_state ? "ON" : "OFF");
     }
 }
@@ -619,20 +617,16 @@ static void main_loop_task(void *arg)
             } else {
                 snprintf(soil_data, sizeof(soil_data), "{\"moisture\":%d}", moisture);
                 cloudflare_post_sensor_data(sensors[2].id, device_id, soil_data);
-                char control_json[255];
-                char message_json[255];
+
+                char control_url[50];
+                snprintf(control_url, sizeof(control_url),
+                             "/api/controls?control_id=%d", sensors[3].id);
                 if (!pump_on && moisture > dry_threshold ) {
                     // post relay status to cloud
                     set_soil_relay(true);
+                    cloudflare_put_json(control_url, "{\"state\":\"on\"}");
+                    cloudflare_post_message(device_id,sensors[3].id,"on",sensors[3].name);
 
-                    snprintf(control_json, sizeof(control_json),
-                             "{\"control_id\":%d,\"state\":\"on\"}", sensors[3].id);
-                    snprintf(message_json, sizeof(message_json),
-                            "{\"control_id\":%d,\"state\":\"on\",\"device_id\":%d,\"from_source\":%s}",
-                            sensors[3].id, device_id, sensors[3].name);
-
-                    cloudflare_post_json("/api/controls", control_json);
-                    cloudflare_post_json("/api/messages", message_json);
                     ESP_LOGW("Soil Moisture Sensor","Soil dry, pump ON\n");
                     pump_on = true;
                     relay_state = true;
@@ -640,14 +634,8 @@ static void main_loop_task(void *arg)
                     set_soil_relay(false);
 
                     // only post at this point
-                    snprintf(control_json, sizeof(control_json),
-                             "{\"control_id\":%d,\"state\":\"off\"}", sensors[3].id);
-                    snprintf(message_json, sizeof(message_json),
-                        "{\"control_id\":%d,\"state\":\"off\",\"device_id\":%d,\"from_source\":%s}",
-                        sensors[3].id, device_id, sensors[3].name);
-
-                    cloudflare_post_json("/api/controls", control_json);
-                    cloudflare_post_json("/api/messages", message_json);
+                    cloudflare_put_json(control_url, "{\"state\":\"off\"}");
+                    cloudflare_post_message(device_id,sensors[3].id,"off",sensors[3].name);
 
                     pump_on = false;
                     relay_state = false;

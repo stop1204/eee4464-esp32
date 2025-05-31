@@ -10,33 +10,7 @@
 static const char *TAG = "cloudflare_api";
 static void (*on_data_sent_cb)(void) = NULL;
 
-// POST any JSON data to any API endpoint
-esp_err_t cloudflare_post_json(const char *endpoint, const char *json_body) {
-    char url[256];
-    snprintf(url, sizeof(url), "%s%s", CLOUDFLARE_API_BASE_URL, endpoint);
 
-    esp_http_client_config_t config = {
-        .url = url,
-        .method = HTTP_METHOD_POST,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_post_field(client, json_body, strlen(json_body));
-    esp_err_t err = esp_http_client_perform(client);
-
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "POST Success [%s]: %s", endpoint, json_body);
-        if (on_data_sent_cb) on_data_sent_cb();
-    } else {
-        ESP_LOGE(TAG, "POST Failed [%s]: %s", endpoint, esp_err_to_name(err));
-    }
-    esp_http_client_cleanup(client);
-    return err;
-}
-
-// GET JSON from any API endpoint
 // Structure to hold data for the HTTP event handler
 typedef struct {
     char *buffer;
@@ -44,6 +18,7 @@ typedef struct {
     int bytes_written;
     esp_err_t err_code; // To capture errors from event handler if any
 } http_event_user_data_t;
+
 
 // Custom HTTP event handler for GET requests
 static esp_err_t _http_event_handler_for_get(esp_http_client_event_t *evt) {
@@ -104,6 +79,72 @@ static esp_err_t _http_event_handler_for_get(esp_http_client_event_t *evt) {
     }
     return ESP_OK;
 }
+
+
+// POST any JSON data to any API endpoint
+esp_err_t cloudflare_post_json(const char *endpoint, const char *json_body) {
+    char url[256];
+    snprintf(url, sizeof(url), "%s%s", CLOUDFLARE_API_BASE_URL, endpoint);
+
+    esp_http_client_config_t config = {
+        .url = url,
+        .method = HTTP_METHOD_POST,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, json_body, strlen(json_body));
+    esp_err_t err = esp_http_client_perform(client);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "POST Success [%s]: %s", endpoint, json_body);
+        if (on_data_sent_cb) on_data_sent_cb();
+    } else {
+        ESP_LOGE(TAG, "POST Failed [%s]: %s", endpoint, esp_err_to_name(err));
+    }
+    esp_http_client_cleanup(client);
+    return err;
+}
+
+/* ----------------------------------------------------------------------
+ * HTTP PUT  (update existing resource)
+ * --------------------------------------------------------------------*/
+esp_err_t cloudflare_put_json(const char *endpoint, const char *json_body)
+{
+    http_event_user_data_t user_data = {
+        .buffer        = NULL,
+        .buffer_size   = 0,
+        .bytes_written = 0,
+        .err_code      = ESP_OK
+    };
+    char url[256];
+    snprintf(url, sizeof(url), "%s%s", CLOUDFLARE_API_BASE_URL, endpoint);
+    esp_http_client_config_t config = {
+        .url               = url,   // macro concat
+        .method            = HTTP_METHOD_PUT,
+        .event_handler     = _http_event_handler_for_get,       // 與 POST 共用 handler
+        .user_data         = &user_data,
+        .crt_bundle_attach = esp_crt_bundle_attach
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, json_body, strlen(json_body));
+
+    esp_err_t err = esp_http_client_perform(client);
+    if (err == ESP_OK && user_data.err_code == ESP_OK) {
+        ESP_LOGI(TAG, "PUT Success [%s]: %s", endpoint, json_body);
+    } else {
+        ESP_LOGE(TAG, "PUT Failed [%s]: %s", endpoint, esp_err_to_name(err));
+        if (err == ESP_OK) err = user_data.err_code;
+    }
+
+    esp_http_client_cleanup(client);
+    return err;
+}
+
+
 
 // GET JSON from any API endpoint
 
@@ -197,20 +238,23 @@ esp_err_t cloudflare_register_sensor(int sensor_id, int device_id, const char* s
  * @brief Post a message from device to /api/messages
  *
  * @param device_id Device identifier
- * @param message_id Unique message identifier (e.g. timestamp)
- * @param msg Message content string
+ * @param control_id Unique message identifier (e.g. timestamp)
+ * @param state Message content string
  * @param from_source Source of the message (e.g. "device")
  * @return esp_err_t ESP_OK on success, error code otherwise
  */
-esp_err_t cloudflare_post_message(int device_id, int message_id, const char* msg, const char* from_source) {
+esp_err_t cloudflare_post_message(int device_id, int control_id, const char* state, const char* from_source) {
+/**
+ * {"control_id":446400104,"state":"off","device_id":4464001,"from_source":"web"}
+ */
     char *json_body = malloc(256);
     if (!json_body) {
         ESP_LOGE(TAG, "No mem");
         return ESP_ERR_NO_MEM;
     }
     snprintf(json_body, 256,
-             "{\"device_id\":%d,\"message_id\":%d,\"message\":\"%s\",\"from_source\":\"%s\"}",
-             device_id, message_id, msg, from_source);
+             "{\"device_id\":%d,\"control_id\":%d,\"state\":\"%s\",\"from_source\":\"%s\"}",
+             device_id, control_id, state, from_source);
     esp_err_t err = cloudflare_post_json("/api/messages", json_body);
     free(json_body);
     return err;
@@ -297,7 +341,7 @@ void app_main() {
     // 1. Register device on startup
     cloudflare_register_device(device_id, device_name, device_type);
 
-    // 2. Post a message with timestamp as message_id
+    // 2. Post a message with timestamp as control_id
     int timestamp = (int)time(NULL);
     cloudflare_post_message(device_id, timestamp, "Device started", "device");
 
