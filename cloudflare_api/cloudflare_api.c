@@ -30,16 +30,16 @@ static esp_err_t _http_event_handler_for_get(esp_http_client_event_t *evt) {
             if (user_data) user_data->err_code = ESP_FAIL;
             break;
         case HTTP_EVENT_ON_CONNECTED:
-            ESP_LOGI(TAG, "HTTP_EVENT_ON_CONNECTED");
+            // ESP_LOGI(TAG, "HTTP_EVENT_ON_CONNECTED");
             break;
         case HTTP_EVENT_HEADER_SENT:
-            ESP_LOGI(TAG, "HTTP_EVENT_HEADER_SENT");
+            // ESP_LOGI(TAG, "HTTP_EVENT_HEADER_SENT");
             break;
         case HTTP_EVENT_ON_HEADER:
-            ESP_LOGI(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
+            // ESP_LOGI(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
             break;
         case HTTP_EVENT_ON_DATA:
-            ESP_LOGI(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
+            // ESP_LOGI(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
             if (user_data && user_data->buffer) {
                 // Check if there's space in the buffer (leaving 1 byte for null terminator)
                 int space_available = user_data->buffer_size - user_data->bytes_written - 1;
@@ -58,7 +58,7 @@ static esp_err_t _http_event_handler_for_get(esp_http_client_event_t *evt) {
             }
             break;
         case HTTP_EVENT_ON_FINISH:
-            ESP_LOGI(TAG, "HTTP_EVENT_ON_FINISH");
+            // ESP_LOGI(TAG, "HTTP_EVENT_ON_FINISH");
             if (user_data && user_data->buffer) {
                 if (user_data->bytes_written < user_data->buffer_size) {
                     user_data->buffer[user_data->bytes_written] = '\0'; // Null-terminate the buffer
@@ -69,7 +69,7 @@ static esp_err_t _http_event_handler_for_get(esp_http_client_event_t *evt) {
             }
             break;
         case HTTP_EVENT_DISCONNECTED:
-            ESP_LOGI(TAG, "HTTP_EVENT_DISCONNECTED");
+            // ESP_LOGI(TAG, "HTTP_EVENT_DISCONNECTED");
             // If an error wasn't already set, and we disconnected unexpectedly,
             // esp_http_client_perform() should return an error.
             // If not, this might indicate a premature disconnection.
@@ -98,7 +98,7 @@ esp_err_t cloudflare_post_json(const char *endpoint, const char *json_body) {
     esp_err_t err = esp_http_client_perform(client);
 
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "POST Success [%s]: %s", endpoint, json_body);
+        // ESP_LOGI(TAG, "POST Success [%s]: %s", endpoint, json_body);
         if (on_data_sent_cb) on_data_sent_cb();
     } else {
         ESP_LOGE(TAG, "POST Failed [%s]: %s", endpoint, esp_err_to_name(err));
@@ -175,7 +175,7 @@ esp_err_t cloudflare_get_json(const char *endpoint, char *buffer, int buffer_siz
 
     if (err == ESP_OK && user_data.err_code == ESP_OK) {
         ESP_LOGI(TAG, "GET Success [%s]: %s", url, buffer);
-        ESP_LOGI(TAG, "DEBUG: HTTP status code: %d", esp_http_client_get_status_code(client));
+        // ESP_LOGI(TAG, "DEBUG: HTTP status code: %d", esp_http_client_get_status_code(client));
     } else {
         ESP_LOGE(TAG, "GET Failed [%s]: %s", endpoint, esp_err_to_name(err));
         /* If perform() was OK but handler reported a problem, propagate that */

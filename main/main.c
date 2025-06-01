@@ -73,7 +73,7 @@ const int sensor_count = sizeof(sensors) / sizeof(sensors[0]);
 
 // soil  moisture sensor configuration
 int dry_threshold = 3000;
-int wet_threshold = 2000;
+int wet_threshold = 1800;
 bool pump_on = false;
 
 
@@ -84,7 +84,7 @@ void on_wifi_connected_notify(void) {
 
 }
 void on_post_success() {
-    ESP_LOGI("Upload", "Data posted successfully.");
+    // ESP_LOGI("Upload", "Data posted successfully.");
 }
 
 // WiFi event handler
@@ -564,13 +564,13 @@ static void main_loop_task(void *arg)
             // get controls from cloud , compare updated_at timestamp
             if (cloudflare_get_json(url_control, controls_buf, sizeof(controls_buf)) == ESP_OK) {
                 // Debug: print raw response content
-                ESP_LOGI("DEBUG", "Raw response content: %s", controls_buf);
+                //ESP_LOGI("DEBUG", "Raw response content: %s", controls_buf);
                 cJSON *root = cJSON_Parse(controls_buf);
                 if (root == NULL) {
-                    ESP_LOGE("DEBUG", "Failed to parse response JSON");
+                    //ESP_LOGE("DEBUG", "Failed to parse response JSON");
                 } else {
                     if (!cJSON_IsArray(root)) {
-                        ESP_LOGE("DEBUG", "Expected JSON array but got something else");
+                        //ESP_LOGE("DEBUG", "Expected JSON array but got something else");
                         cJSON_Delete(root);
                     } else {
                         int array_size = cJSON_GetArraySize(root);
@@ -605,7 +605,7 @@ static void main_loop_task(void *arg)
         }
 
         // Read soil moisture sensor value every 3 seconds    500 ticks*6
-        if (++soil_read_counter >= 6) {
+        if (++soil_read_counter >= 3) {
             // Read soil moisture sensor value
             int moisture = read_soil_sensor();
             // Post soil data to cloud
@@ -615,13 +615,15 @@ static void main_loop_task(void *arg)
                 ESP_LOGE("Soil Moisture Sensor", "Invalid moisture value: %d", moisture);
                 // Skip this iteration if the value is out of range
             } else {
-                snprintf(soil_data, sizeof(soil_data), "{\"moisture\":%d}", moisture);
+				ESP_LOGW("Soil Moisture Sensor", "Moisture value: %d", moisture);
+                snprintf(soil_data, sizeof(soil_data), "{\"moisture\":\"%d\"}", moisture);
                 cloudflare_post_sensor_data(sensors[2].id, device_id, soil_data);
 
                 char control_url[50];
                 snprintf(control_url, sizeof(control_url),
                              "/api/controls?control_id=%d", sensors[3].id);
                 if (!pump_on && moisture > dry_threshold ) {
+
                     // post relay status to cloud
                     set_soil_relay(true);
                     cloudflare_put_json(control_url, "{\"state\":\"on\"}");
@@ -630,7 +632,8 @@ static void main_loop_task(void *arg)
                     ESP_LOGW("Soil Moisture Sensor","Soil dry, pump ON\n");
                     pump_on = true;
                     relay_state = true;
-                } else if (pump_on && moisture < wet_threshold ) {
+                } else if ( pump_on && moisture < wet_threshold ) {
+
                     set_soil_relay(false);
 
                     // only post at this point
