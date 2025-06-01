@@ -34,6 +34,9 @@
 #include "freertos/event_groups.h"
 #include "driver/temperature_sensor.h"
 
+#include "freertos/queue.h"
+
+
 // define GPIO
 #define LED_STATUS_GPIO GPIO_NUM_5
 #define SOIL_SENSOR_ADC ADC1_CHANNEL_0 // GPIO36
@@ -77,6 +80,24 @@ int wet_threshold = 1800;
 bool pump_on = false;
 
 
+// async HTTP client
+typedef struct {
+    char endpoint[64];
+    char json_body[256];
+} http_request_t;
+#define HTTP_QUEUE_LENGTH 8
+static QueueHandle_t http_request_queue = NULL;
+
+
+
+void http_request_task(void *arg) {
+    http_request_t req;
+    while (1) {
+        if (xQueueReceive(http_request_queue, &req, portMAX_DELAY)) {
+            cloudflare_post_json(req.endpoint, req.json_body);
+        }
+    }
+}
 
 // predeclaration of functions
 void on_wifi_connected_notify(void) {
@@ -616,8 +637,17 @@ static void main_loop_task(void *arg)
                 // Skip this iteration if the value is out of range
             } else {
 				ESP_LOGW("Soil Moisture Sensor", "Moisture value: %d", moisture);
-                snprintf(soil_data, sizeof(soil_data), "{\"moisture\":\"%d\"}", moisture);
-                cloudflare_post_sensor_data(sensors[2].id, device_id, soil_data);
+				// ============ http async ======================
+                // snprintf(soil_data, sizeof(soil_data), "{\"moisture\":\"%d\"}", moisture);
+				http_request_t req1;
+				snprintf(req1.endpoint, sizeof(req1.endpoint), "/api/sensor_data");
+				snprintf(req1.json_body, sizeof(req1.json_body),
+         				"{\"sensor_id\":%d,\"device_id\":%d,\"data\":%s}",
+         				sensors[2].id, device_id, soil_data);
+				xQueueSend(http_request_queue, &req1, 0);
+				// ============ http async queue ======================
+
+                // cloudflare_post_sensor_data(sensors[2].id, device_id, soil_data);
 
                 char control_url[50];
                 snprintf(control_url, sizeof(control_url),
@@ -626,8 +656,22 @@ static void main_loop_task(void *arg)
 
                     // post relay status to cloud
                     set_soil_relay(true);
-                    cloudflare_put_json(control_url, "{\"state\":\"on\"}");
-                    cloudflare_post_message(device_id,sensors[3].id,"on",sensors[3].name);
+					// ============ http async ======================
+
+                    // cloudflare_put_json(control_url, "{\"state\":\"on\"}");
+                    // cloudflare_post_message(device_id,sensors[3].id,"on",sensors[3].name);
+
+					http_request_t req2, req3;
+   					snprintf(req2.endpoint, sizeof(req2.endpoint), "%s", control_url);
+    				snprintf(req2.json_body, sizeof(req2.json_body), "{\"state\":\"on\"}");
+    				xQueueSend(http_request_queue, &req2, 0);
+
+    				snprintf(req3.endpoint, sizeof(req3.endpoint), "/api/messages");
+    				snprintf(req3.json_body, sizeof(req3.json_body),
+             				"{\"device_id\":%d,\"control_id\":%d,\"state\":\"on\",\"from_source\":\"%s\"}",
+             				device_id, sensors[3].id, sensors[3].name);
+    				xQueueSend(http_request_queue, &req3, 0);
+					// ============ http async queue ======================
 
                     ESP_LOGW("Soil Moisture Sensor","Soil dry, pump ON\n");
                     pump_on = true;
@@ -635,10 +679,21 @@ static void main_loop_task(void *arg)
                 } else if ( pump_on && moisture < wet_threshold ) {
 
                     set_soil_relay(false);
-
+					// ============ http async ======================
                     // only post at this point
-                    cloudflare_put_json(control_url, "{\"state\":\"off\"}");
-                    cloudflare_post_message(device_id,sensors[3].id,"off",sensors[3].name);
+                    // cloudflare_put_json(control_url, "{\"state\":\"off\"}");
+                    // cloudflare_post_message(device_id,sensors[3].id,"off",sensors[3].name);
+                    http_request_t req2, req3;
+                    snprintf(req2.endpoint, sizeof(req2.endpoint), "%s", control_url);
+                    snprintf(req2.json_body, sizeof(req2.json_body), "{\"state\":\"off\"}");
+                    xQueueSend(http_request_queue, &req2, 0);
+
+                    snprintf(req3.endpoint, sizeof(req3.endpoint), "/api/messages");
+                    snprintf(req3.json_body, sizeof(req3.json_body),
+                             "{\"device_id\":%d,\"control_id\":%d,\"state\":\"off\",\"from_source\":\"%s\"}",
+                             device_id, sensors[3].id, sensors[3].name);
+                    xQueueSend(http_request_queue, &req3, 0);
+					// =========== http async queue ======================
 
                     pump_on = false;
                     relay_state = false;
@@ -653,6 +708,10 @@ static void main_loop_task(void *arg)
 void app_main(void)
 {
     init();
+
+	http_request_queue = xQueueCreate(HTTP_QUEUE_LENGTH, sizeof(http_request_t));
+    xTaskCreate(http_request_task, "http_request_task", 4096, NULL, 7, NULL);
+
     /* Run main loop in a separate task with a larger stack to avoid main‑task overflow */
     xTaskCreatePinnedToCore(main_loop_task, "main_loop", 16384, NULL, 5, NULL, 0);
     vTaskDelete(NULL);   // main task can exit now

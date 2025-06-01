@@ -174,7 +174,8 @@ esp_err_t cloudflare_get_json(const char *endpoint, char *buffer, int buffer_siz
     esp_err_t err = esp_http_client_perform(client);
 
     if (err == ESP_OK && user_data.err_code == ESP_OK) {
-        ESP_LOGI(TAG, "GET Success [%s]: %s", url, buffer);
+        ESP_LOGI(TAG, "GET Success [%s]", url);
+        // ESP_LOGI(TAG, "GET Success [%s]: %s", url, buffer);
         // ESP_LOGI(TAG, "DEBUG: HTTP status code: %d", esp_http_client_get_status_code(client));
     } else {
         ESP_LOGE(TAG, "GET Failed [%s]: %s", endpoint, esp_err_to_name(err));
