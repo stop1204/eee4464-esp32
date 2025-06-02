@@ -44,8 +44,10 @@
 #define SOIL_SENSOR_ADC_ATTEN ADC_ATTEN_DB_11 // 11dB attenuation for 3.3V range
 #define SOIL_RELAY_GPIO GPIO_NUM_25
 #define TEST_BUTTON_GPIO GPIO_NUM_4 // GPIO0 for test button
-
 #define MAX_CONTROLS_BUFFER 256
+#define ACS712_ADC_CHANNEL ADC1_CHANNEL_6  // GPIO34
+#define ACS712_ADC_WIDTH   ADC_WIDTH_BIT_12
+#define ACS712_ADC_ATTEN   ADC_ATTEN_DB_11
 
 
 // Global event group for WiFi connection
@@ -475,6 +477,11 @@ void init(void)
     gpio_set_direction(TEST_BUTTON_GPIO, GPIO_MODE_INPUT);
     gpio_set_pull_mode(TEST_BUTTON_GPIO, GPIO_PULLUP_ONLY);
 
+	// ACS712 current sensor config.
+    adc1_config_width(ACS712_ADC_WIDTH);
+    adc1_config_channel_atten(ACS712_ADC_CHANNEL, ACS712_ADC_ATTEN); // GPIO34
+
+
 }
 void end(void)
 {
@@ -504,7 +511,7 @@ void button_task(void* arg) {
              uxTaskGetStackHighWaterMark(NULL));
     while (1) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        // 按下立即處理邏輯
+
         relay_state = !relay_state;
         pump_on = relay_state;
         set_soil_relay(relay_state);
@@ -568,18 +575,12 @@ static void main_loop_task(void *arg)
     static int soil_read_counter = 0;
     static int cloud_status_counter = 0;
 
-    // Setup button task and ISR
-    xTaskCreate(button_task, "button_task", BUTTON_TASK_STACK, NULL, 10, &button_task_handle);
-    setup_test_button_interrupt();
 
     static bool led_on = false;
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(500)); // Delay for 0.5 seconds
 
-        // Toggle status LED
-        led_on = !led_on;
-        gpio_set_level(LED_STATUS_GPIO, led_on);
 
         if (++cloud_status_counter >= 4) { // Post status every 2 seconds
             // get controls from cloud , compare updated_at timestamp
@@ -704,7 +705,32 @@ static void main_loop_task(void *arg)
         }
     }
 }
+static void second_loop_task(void *arg)
+{
+    static bool led_on = false;
 
+    // initialize test button task
+    xTaskCreate(button_task, "button_task", BUTTON_TASK_STACK, NULL, 10, &button_task_handle);
+    setup_test_button_interrupt();
+
+    while (1) {
+        // LED blink
+        led_on = !led_on;
+        gpio_set_level(LED_STATUS_GPIO, led_on);
+
+        vTaskDelay(pdMS_TO_TICKS(500)); // 500ms delay
+
+
+		// caculate Vref and voltage (V), ESP32 ADC theoretical max is 4095 (12bit)
+		float voltage = (float)adc1_get_raw(ACS712_ADC_CHANNEL) / 4095.0 * 3.3;
+
+		// 0 current,  voltage output Vcc/2 ~=> 2.5V  (input 5V)
+		// offset = 2.5V, sensitivity = 0.185V/A (for 5A module)
+		float current = (voltage - 2.5) / 0.185;
+
+		ESP_LOGW("ACS712", "Current: %.2f A, Voltage: %.2f V", current, voltage);
+    }
+}
 void app_main(void)
 {
     init();
@@ -714,6 +740,7 @@ void app_main(void)
 
     /* Run main loop in a separate task with a larger stack to avoid main‑task overflow */
     xTaskCreatePinnedToCore(main_loop_task, "main_loop", 16384, NULL, 5, NULL, 0);
+	xTaskCreatePinnedToCore(second_loop_task, "second_loop", 8192, NULL, 6, NULL, 1);
     vTaskDelete(NULL);   // main task can exit now
 }
 
