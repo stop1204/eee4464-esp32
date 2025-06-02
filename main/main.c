@@ -507,10 +507,10 @@ static bool relay_state = false;
 
 // Button task to handle relay toggling
 void button_task(void* arg) {
-    ESP_LOGI("button_task", "Stack high-water mark at start: %u words",
-             uxTaskGetStackHighWaterMark(NULL));
+    // ESP_LOGI("button_task", "Stack high-water mark at start: %u words",  uxTaskGetStackHighWaterMark(NULL));
     while (1) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+		vTaskDelay(pdMS_TO_TICKS(20));
 
         relay_state = !relay_state;
         pump_on = relay_state;
@@ -533,7 +533,11 @@ void button_task(void* arg) {
 
 // ISR handler for test button
 static void IRAM_ATTR test_button_isr_handler(void* arg) {
-    xTaskNotifyFromISR(button_task_handle, 0, eNoAction, NULL);
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xTaskNotifyFromISR(button_task_handle, 0, eNoAction, &xHigherPriorityTaskWoken);
+    if (xHigherPriorityTaskWoken) {
+        portYIELD_FROM_ISR();
+    }
 }
 
 // Helper to setup test button interrupt
@@ -713,6 +717,15 @@ static void second_loop_task(void *arg)
     xTaskCreate(button_task, "button_task", BUTTON_TASK_STACK, NULL, 10, &button_task_handle);
     setup_test_button_interrupt();
 
+
+	float zero_offset = 2.4;
+
+	void calibrate_zero_offset() {
+    	int raw = 0;
+    	for (int i = 0; i < 256; ++i)
+        	raw += adc1_get_raw(ACS712_ADC_CHANNEL);
+    	zero_offset = (raw / 256.0) / 4095.0 * 3.3;
+	}
     while (1) {
         // LED blink
         led_on = !led_on;
@@ -722,13 +735,17 @@ static void second_loop_task(void *arg)
 
 
 		// caculate Vref and voltage (V), ESP32 ADC theoretical max is 4095 (12bit)
-		float voltage = (float)adc1_get_raw(ACS712_ADC_CHANNEL) / 4095.0 * 3.3;
+		int raw = 0;
+    	for (int i = 0; i < 64; ++i) {
+        	raw += adc1_get_raw(ACS712_ADC_CHANNEL);
+    	}
+		float voltage = (raw / 64.0) / 4095.0 * 3.3;
 
 		// 0 current,  voltage output Vcc/2 ~=> 2.5V  (input 5V)
 		// offset = 2.5V, sensitivity = 0.185V/A (for 5A module)
-		float current = (voltage - 2.5) / 0.185;
+		float current = (voltage - zero_offset) / 0.185;
 
-		ESP_LOGW("ACS712", "Current: %.2f A, Voltage: %.2f V", current, voltage);
+		ESP_LOGW("ACS712", "Current: %.2f A", current);
     }
 }
 void app_main(void)
