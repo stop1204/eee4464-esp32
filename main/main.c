@@ -28,6 +28,7 @@
 #include "driver/gpio.h"
 #include "driver/adc.h"
 #include "esp_sntp.h"
+#include <math.h>
 // API
 #include "cloudflare_api.h"
 
@@ -35,7 +36,7 @@
 #include "driver/temperature_sensor.h"
 
 #include "freertos/queue.h"
-
+#include "mqtt_client.h"
 
 // define GPIO
 #define LED_STATUS_GPIO GPIO_NUM_5
@@ -89,6 +90,12 @@ typedef struct {
 } http_request_t;
 #define HTTP_QUEUE_LENGTH 8
 static QueueHandle_t http_request_queue = NULL;
+
+
+// ACS712 current sensor configuration
+float zero_offset = 2.4;
+
+
 
 
 
@@ -271,6 +278,9 @@ void wifi_setup(void) {
         ESP_LOGW(TAG, "WiFi not connected in 15s, switching to softAP mode.");
         setup_softap();
     }
+
+
+
 
     // Start HTTP server for configuration
     httpd_handle_t server = NULL;
@@ -579,9 +589,6 @@ static void main_loop_task(void *arg)
     static int soil_read_counter = 0;
     static int cloud_status_counter = 0;
 
-
-    static bool led_on = false;
-
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(500)); // Delay for 0.5 seconds
 
@@ -709,6 +716,13 @@ static void main_loop_task(void *arg)
         }
     }
 }
+	void calibrate_zero_offset() {
+    	int raw = 0;
+    	for (int i = 0; i < 256; ++i)
+        	raw += adc1_get_raw(ACS712_ADC_CHANNEL);
+    	zero_offset = (raw / 256.0) / 4095.0 * 3.3;
+		ESP_LOGI("ACS712", "Zero offset calibrated: %.2f V", zero_offset);
+	}
 static void second_loop_task(void *arg)
 {
     static bool led_on = false;
@@ -716,36 +730,47 @@ static void second_loop_task(void *arg)
     // initialize test button task
     xTaskCreate(button_task, "button_task", BUTTON_TASK_STACK, NULL, 10, &button_task_handle);
     setup_test_button_interrupt();
+	calibrate_zero_offset();
 
+	char mqtt_payload[64];
+	// MQTT
+	const esp_mqtt_client_config_t mqtt_cfg = {
+    	 .broker.address.uri = "mqtts://6bdeb9e091414b898b8a01d7ab63bcd2.s1.eu.hivemq.cloud:8883",
+    	.credentials.username = "eee4464",
+    	.credentials.authentication.password = "Eee4464iot",
+		.broker.verification.skip_cert_common_name_check = true,
+	};
+	esp_mqtt_client_handle_t mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
+	esp_mqtt_client_start(mqtt_client);
 
-	float zero_offset = 2.4;
-
-	void calibrate_zero_offset() {
-    	int raw = 0;
-    	for (int i = 0; i < 256; ++i)
-        	raw += adc1_get_raw(ACS712_ADC_CHANNEL);
-    	zero_offset = (raw / 256.0) / 4095.0 * 3.3;
-	}
     while (1) {
         // LED blink
         led_on = !led_on;
         gpio_set_level(LED_STATUS_GPIO, led_on);
 
         vTaskDelay(pdMS_TO_TICKS(500)); // 500ms delay
-
+		int current_count = 0;
 
 		// caculate Vref and voltage (V), ESP32 ADC theoretical max is 4095 (12bit)
-		int raw = 0;
-    	for (int i = 0; i < 64; ++i) {
-        	raw += adc1_get_raw(ACS712_ADC_CHANNEL);
-    	}
-		float voltage = (raw / 64.0) / 4095.0 * 3.3;
-
 		// 0 current,  voltage output Vcc/2 ~=> 2.5V  (input 5V)
 		// offset = 2.5V, sensitivity = 0.185V/A (for 5A module)
-		float current = (voltage - zero_offset) / 0.185;
+		float current = 0.0f;
+		if (++current_count >= 4) { // every 2 seconds
+			int raw = 0;
+    		for (int i = 0; i < 64; ++i) {
+        		raw += adc1_get_raw(ACS712_ADC_CHANNEL);
+    		}
+			float voltage = (raw / 64.0) / 4095.0 * 3.3;
+			current = (voltage - zero_offset) / 0.185;
+			current = fabs(current);
+			// through MQTT post current data
+			snprintf(mqtt_payload, sizeof(mqtt_payload), "{\"current\":%.2f}", fabs(current));
+			esp_mqtt_client_publish(mqtt_client, "iot/current", mqtt_payload, 0, 1, 0);
+            current_count = 0;
 
-		ESP_LOGW("ACS712", "Current: %.2f A", current);
+			ESP_LOGI("ACS712", "Current: %.2f A", current);
+        }
+
     }
 }
 void app_main(void)

@@ -20,6 +20,7 @@ idf_component_register(
         esp_driver_tsens
         console
         mbedtls
+        mqtt
 
 
 
