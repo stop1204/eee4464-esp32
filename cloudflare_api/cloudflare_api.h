@@ -2,6 +2,8 @@
 #define CLOUDFLARE_API_H
 
 #include "esp_err.h"
+// NOTE: All HTTP requests set .timeout_ms to avoid WDT. Adjust in cloudflare_api.c if needed.
+
 
 // upload single value(such as temperature)
 //esp_err_t cloudflare_post_sensor_data(const char* url, const char* api_key, float value);

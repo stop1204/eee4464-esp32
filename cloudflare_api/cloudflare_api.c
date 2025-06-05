@@ -9,6 +9,7 @@
 
 static const char *TAG = "cloudflare_api";
 static void (*on_data_sent_cb)(void) = NULL;
+static const int TIMEOUT_MS = 15000; // Default timeout for HTTP requests
 
 
 // Structure to hold data for the HTTP event handler
@@ -90,7 +91,7 @@ esp_err_t cloudflare_post_json(const char *endpoint, const char *json_body) {
         .url = url,
         .method = HTTP_METHOD_POST,
         .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = 5000, // Set a timeout for the request
+        .timeout_ms = TIMEOUT_MS, // Set a timeout for the request
 
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -128,7 +129,7 @@ esp_err_t cloudflare_put_json(const char *endpoint, const char *json_body)
         .event_handler     = _http_event_handler_for_get,       // 與 POST 共用 handler
         .user_data         = &user_data,
         .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = 5000, // Set a timeout for the request
+        .timeout_ms = TIMEOUT_MS, // Set a timeout for the request
 
     };
 
@@ -171,7 +172,7 @@ esp_err_t cloudflare_get_json(const char *endpoint, char *buffer, int buffer_siz
         .user_data     = &user_data,
         .buffer_size   = buffer_size,         /* use caller‑provided buffer to save RAM */
         .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = 5000, // Set a timeout for the request
+        .timeout_ms = TIMEOUT_MS, // Set a timeout for the request
         /* .buffer_size_tx can stay default (no body for GET) */
     };
 
