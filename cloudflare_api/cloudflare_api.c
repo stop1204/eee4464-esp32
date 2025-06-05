@@ -90,6 +90,7 @@ esp_err_t cloudflare_post_json(const char *endpoint, const char *json_body) {
     esp_http_client_config_t config = {
         .url = url,
         .method = HTTP_METHOD_POST,
+        .event_handler = _http_event_handler_for_get, // Use the same handler as for GET
         .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = TIMEOUT_MS, // Set a timeout for the request
 

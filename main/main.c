@@ -100,7 +100,7 @@ static QueueHandle_t http_request_queue = NULL;
 
 // ACS712 current sensor configuration
 float zero_offset = 2.4;
-
+static bool registered = false; // flag to indicate if device is registered
 
 
 
@@ -390,6 +390,19 @@ void register_device(void)
     // Register callback after successful POST
     cloudflare_api_on_data_sent(on_post_success);
 
+    // get devices and sensors from cloudflare
+    char *devices_buf = malloc(1024);
+    char *sensors_buf = malloc(1024);
+    cloudflare_get_json("/api/devices", devices_buf, 1024);
+    cloudflare_get_json("/api/sensors", sensors_buf, 1024);
+
+    // if device is already registered, contains device_id and sensor_id just skip
+    char keybuf[32];
+    snprintf(keybuf, sizeof(keybuf), "\"device_id\":%d", device_id);
+    if (strstr(devices_buf, keybuf) != NULL) {
+        free(devices_buf);
+    }
+
     // Register the device
     cloudflare_register_device(device_id, device_name, device_type);
     ESP_LOGI(device_name,"Device registered with ID: %d, Name: %s, Type: %s", device_id, device_name, device_type);
@@ -399,12 +412,19 @@ void register_device(void)
         int sensor_id = sensors[i].id;;
         const char* sensor_name = sensors[i].name;
         const char* sensor_type = sensors[i].type;
-
+        if (strstr(sensors_buf, "\"sensor_id\":") != NULL) {
+            // Sensor already registered, skip
+            ESP_LOGI(sensor_name,"Sensor %s already registered, skipping.", sensor_name);
+            continue;
+        }
         // Register each sensor
         cloudflare_register_sensor(sensor_id, device_id, sensor_name, sensor_type);
         ESP_LOGI(sensor_name,"Sensor registered with ID: %d, Name: %s, Type: %s", sensor_id, sensor_name, sensor_type);
     }
 
+    // a flag to indicate device registration
+    registered = true;
+    free(sensors_buf);
 }
 // soil moisture sensor
 int read_soil_sensor() {
@@ -594,6 +614,8 @@ static void main_loop_task(void *arg)
     /* Wait until WiFi is connected, then register device & sensors */
     xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
     register_device();
+
+
 
     // === Original body of app_main() starting after init(); ===
     // Wait for time to sync
@@ -866,6 +888,11 @@ void app_main(void)
 
     /* Run main loop in a separate task with a larger stack to avoid main‑task overflow */
     xTaskCreatePinnedToCore(main_loop_task, "main_loop", 16384, NULL, 5, NULL, 0);
+
+    while (!registered) {
+        // Wait for device registration to complete
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 	xTaskCreatePinnedToCore(second_loop_task, "second_loop", 8192, NULL, 6, NULL, 1);
     vTaskDelete(NULL);   // main task can exit now
 }
