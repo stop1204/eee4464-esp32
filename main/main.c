@@ -38,7 +38,7 @@
 
 #include "freertos/queue.h"
 #include "mqtt_client.h"
-
+#include "esp_task_wdt.h"
 // define GPIO
 #define LED_STATUS_GPIO GPIO_NUM_5
 #define SOIL_SENSOR_ADC ADC1_CHANNEL_0 // GPIO36
@@ -106,9 +106,11 @@ float zero_offset = 2.4;
 
 
 void http_request_task(void *arg) {
+    esp_task_wdt_add(NULL);
     http_request_t req;
     while (1) {
         if (xQueueReceive(http_request_queue, &req, portMAX_DELAY)) {
+            esp_task_wdt_reset();
             cloudflare_post_json(req.endpoint, req.json_body);
         }
     }
@@ -455,6 +457,18 @@ void update_threshold_from_cloud() {
     }
 }
 
+// RCWL-0516 sensor configuration
+static void setup_rcwl0516_sensor(void) {
+
+	gpio_config_t io_conf = {
+        .pin_bit_mask = 1ULL << RCWL_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io_conf);
+}
 void init_time() {
     sntp_setoperatingmode(SNTP_OPMODE_POLL);
     sntp_setservername(0, "pool.ntp.org");
@@ -497,7 +511,8 @@ void init(void)
     adc1_config_width(ACS712_ADC_WIDTH);
     adc1_config_channel_atten(ACS712_ADC_CHANNEL, ACS712_ADC_ATTEN); // GPIO34
 
-
+    // microwave radar sensor config.
+    setup_rcwl0516_sensor();
 }
 void end(void)
 {
@@ -569,18 +584,6 @@ static void setup_test_button_interrupt(void) {
     gpio_isr_handler_add(TEST_BUTTON_GPIO, test_button_isr_handler, NULL);
 }
 
-// RCWL-0516 sensor configuration
-static void setup_rcwl0516_sensor(void) {
-
-	gpio_config_t io_conf = {
-        .pin_bit_mask = 1ULL << RCWL_GPIO,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&io_conf);
-}
 
 // --------------------- main application loop task ------------------------
 static void main_loop_task(void *arg)
@@ -859,10 +862,10 @@ void app_main(void)
     init();
 
 	http_request_queue = xQueueCreate(HTTP_QUEUE_LENGTH, sizeof(http_request_t));
-    xTaskCreate(http_request_task, "http_request_task", 8192, NULL, 7, NULL);
+    xTaskCreate(http_request_task, "http_request_task", 16384, NULL, 7, NULL);
 
     /* Run main loop in a separate task with a larger stack to avoid main‑task overflow */
-    //xTaskCreatePinnedToCore(main_loop_task, "main_loop", 16384, NULL, 5, NULL, 0);
+    xTaskCreatePinnedToCore(main_loop_task, "main_loop", 16384, NULL, 5, NULL, 0);
 	xTaskCreatePinnedToCore(second_loop_task, "second_loop", 8192, NULL, 6, NULL, 1);
     vTaskDelete(NULL);   // main task can exit now
 }

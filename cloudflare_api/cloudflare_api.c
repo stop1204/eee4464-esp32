@@ -90,6 +90,8 @@ esp_err_t cloudflare_post_json(const char *endpoint, const char *json_body) {
         .url = url,
         .method = HTTP_METHOD_POST,
         .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms = 5000, // Set a timeout for the request
+
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
 
@@ -125,7 +127,9 @@ esp_err_t cloudflare_put_json(const char *endpoint, const char *json_body)
         .method            = HTTP_METHOD_PUT,
         .event_handler     = _http_event_handler_for_get,       // 與 POST 共用 handler
         .user_data         = &user_data,
-        .crt_bundle_attach = esp_crt_bundle_attach
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms = 5000, // Set a timeout for the request
+
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -167,6 +171,7 @@ esp_err_t cloudflare_get_json(const char *endpoint, char *buffer, int buffer_siz
         .user_data     = &user_data,
         .buffer_size   = buffer_size,         /* use caller‑provided buffer to save RAM */
         .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms = 5000, // Set a timeout for the request
         /* .buffer_size_tx can stay default (no body for GET) */
     };
 
