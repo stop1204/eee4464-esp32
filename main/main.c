@@ -823,16 +823,25 @@ static void second_loop_task(void *arg)
 			esp_err_t res = dht_read_float_data(DHT_TYPE_DHT11, DHT_GPIO, &humidity, &temperature);
        		if (res == ESP_OK) {
                 // this DHT11 sensor has a error in temperature reading, so we need to adjust it
-                	//  humidity= humidity/2 - 10.0f;
-                	// temperature = temperature - 30.0f;
-            	ESP_LOGI("DHT", "🌡️ Temperature: %.1f°C, 💧 Humidity: %.1f%%", temperature-30.0f, humidity /2-10.0f);
+                humidity= humidity*0.375+25.0f;  //old
+                temperature = temperature -30.0f;
+
+            	ESP_LOGI("DHT", "🌡️ Temperature: %.1f°C, 💧 Humidity: %.1f%%", temperature, humidity);
                 	// Post temperature and humidity data to cloud
+                // is one sensor but send two data to different sensors
                 http_request_t req1;
                 snprintf(req1.endpoint, sizeof(req1.endpoint), "/api/sensor_data");
                 snprintf(req1.json_body, sizeof(req1.json_body),
-                       "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"temperature\":%.1f,\"humidity\":%.1f}}",
-                       sensors[0].id, device_id, temperature/2-10.0f, humidity-30.0f);
+                       "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"temperature\":%.1f}}",
+                       sensors[0].id, device_id, temperature);
+                http_request_t req2;
+                snprintf(req2.endpoint, sizeof(req2.endpoint), "/api/sensor_data");
+                snprintf(req2.json_body, sizeof(req2.json_body),
+                       "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"humidity\":%.1f}}",
+                       sensors[1].id, device_id, humidity);
                 xQueueSend(http_request_queue, &req1, 0);
+                xQueueSend(http_request_queue, &req2, 0);
+
         	}
         }
 
@@ -850,7 +859,7 @@ void app_main(void)
     init();
 
 	http_request_queue = xQueueCreate(HTTP_QUEUE_LENGTH, sizeof(http_request_t));
-    xTaskCreate(http_request_task, "http_request_task", 4096, NULL, 7, NULL);
+    xTaskCreate(http_request_task, "http_request_task", 8192, NULL, 7, NULL);
 
     /* Run main loop in a separate task with a larger stack to avoid main‑task overflow */
     //xTaskCreatePinnedToCore(main_loop_task, "main_loop", 16384, NULL, 5, NULL, 0);
