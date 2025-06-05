@@ -15,6 +15,7 @@
 #include "esp_system.h"
 #include <sys/param.h>
 #include <time.h>
+#include "dht.h"
 #include "esp_netif_ip_addr.h"
 
 // ESP-IDF WiFi AP/Web config includes
@@ -49,8 +50,12 @@
 #define ACS712_ADC_CHANNEL ADC1_CHANNEL_6  // GPIO34
 #define ACS712_ADC_WIDTH   ADC_WIDTH_BIT_12
 #define ACS712_ADC_ATTEN   ADC_ATTEN_DB_11
+#define RCWL_GPIO GPIO_NUM_32 // RCWL-0516 sensor GPIO
+#define DHT_GPIO GPIO_NUM_0
 
 
+extern const uint8_t ca_cert_pem_start[] asm("_binary_ca_cert_pem_start");
+extern const uint8_t ca_cert_pem_end[]   asm("_binary_ca_cert_pem_end");
 // Global event group for WiFi connection
 EventGroupHandle_t wifi_event_group;
 const int WIFI_CONNECTED_BIT = BIT0;
@@ -70,10 +75,11 @@ struct Sensor {
   const char* type;
 };
 struct Sensor  sensors[] = {
-	{device_id * 100 + 1,"Example Temperature Sensor","Temperature"},
-	{device_id * 100 + 2,"Example Humidity Sensor" ,"Humidity"},
+	{device_id * 100 + 1,"Temperature Sensor","Temperature"},
+	{device_id * 100 + 2,"Humidity Sensor" ,"Humidity"},
 	{device_id * 100 + 3,"Soil Moisture Sensor" ,"Moisture"},
-	{device_id * 100 + 4,"Soil Replay Sensor" ,"Replay"}
+	{device_id * 100 + 4,"Soil Replay Sensor" ,"Replay"},
+    {device_id * 100 + 5,"ACS712 Hall Effect Sensor" ,"Current"},
 };
 const int sensor_count = sizeof(sensors) / sizeof(sensors[0]);
 
@@ -563,6 +569,19 @@ static void setup_test_button_interrupt(void) {
     gpio_isr_handler_add(TEST_BUTTON_GPIO, test_button_isr_handler, NULL);
 }
 
+// RCWL-0516 sensor configuration
+static void setup_rcwl0516_sensor(void) {
+
+	gpio_config_t io_conf = {
+        .pin_bit_mask = 1ULL << RCWL_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io_conf);
+}
+
 // --------------------- main application loop task ------------------------
 static void main_loop_task(void *arg)
 {
@@ -726,7 +745,8 @@ static void main_loop_task(void *arg)
 static void second_loop_task(void *arg)
 {
     static bool led_on = false;
-
+	float temperature = 0;
+    float humidity = 0;
     // initialize test button task
     xTaskCreate(button_task, "button_task", BUTTON_TASK_STACK, NULL, 10, &button_task_handle);
     setup_test_button_interrupt();
@@ -735,13 +755,19 @@ static void second_loop_task(void *arg)
 	char mqtt_payload[64];
 	// MQTT
 	const esp_mqtt_client_config_t mqtt_cfg = {
-    	 .broker.address.uri = "mqtts://6bdeb9e091414b898b8a01d7ab63bcd2.s1.eu.hivemq.cloud:8883",
+    	.broker.address.uri = "mqtts://6bdeb9e091414b898b8a01d7ab63bcd2.s1.eu.hivemq.cloud:8883",
+    	//.broker.verification.certificate = NULL,
+		.broker.verification.certificate = (const char *)ca_cert_pem_start,
     	.credentials.username = "eee4464",
     	.credentials.authentication.password = "Eee4464iot",
-		.broker.verification.skip_cert_common_name_check = true,
+    	//.broker.verification.use_global_ca_store = false,
 	};
 	esp_mqtt_client_handle_t mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
 	esp_mqtt_client_start(mqtt_client);
+
+
+	int current_count = 0;
+	float current = 0.0f;
 
     while (1) {
         // LED blink
@@ -749,13 +775,27 @@ static void second_loop_task(void *arg)
         gpio_set_level(LED_STATUS_GPIO, led_on);
 
         vTaskDelay(pdMS_TO_TICKS(500)); // 500ms delay
-		int current_count = 0;
 
 		// caculate Vref and voltage (V), ESP32 ADC theoretical max is 4095 (12bit)
 		// 0 current,  voltage output Vcc/2 ~=> 2.5V  (input 5V)
 		// offset = 2.5V, sensitivity = 0.185V/A (for 5A module)
-		float current = 0.0f;
 		if (++current_count >= 4) { // every 2 seconds
+            current_count = 0;
+
+			// Read RCWL-0516 sensor
+			int level = gpio_get_level(RCWL_GPIO);
+        	if (level == 1) {
+            	ESP_LOGI("RCWL", "🚶‍♂️ Motion detected!");
+        	} else {
+           		ESP_LOGI("RCWL", "🌫️ No motion.");
+        	}
+
+
+
+
+
+
+
 			int raw = 0;
     		for (int i = 0; i < 64; ++i) {
         		raw += adc1_get_raw(ACS712_ADC_CHANNEL);
@@ -766,10 +806,42 @@ static void second_loop_task(void *arg)
 			// through MQTT post current data
 			snprintf(mqtt_payload, sizeof(mqtt_payload), "{\"current\":%.2f}", fabs(current));
 			esp_mqtt_client_publish(mqtt_client, "iot/current", mqtt_payload, 0, 1, 0);
-            current_count = 0;
+            http_request_t req;
+            snprintf(req.endpoint, sizeof(req.endpoint), "/api/sensor_data");
+            snprintf(req.json_body, sizeof(req.json_body),
+                     "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"current\":%.2f}}",
+                     sensors[4].id, device_id, current);
+            xQueueSend(http_request_queue, &req, 0);
+
+
+
+
 
 			ESP_LOGI("ACS712", "Current: %.2f A", current);
+
+
+			esp_err_t res = dht_read_float_data(DHT_TYPE_DHT11, DHT_GPIO, &humidity, &temperature);
+       		if (res == ESP_OK) {
+                // this DHT11 sensor has a error in temperature reading, so we need to adjust it
+                	//  humidity= humidity/2 - 10.0f;
+                	// temperature = temperature - 30.0f;
+            	ESP_LOGI("DHT", "🌡️ Temperature: %.1f°C, 💧 Humidity: %.1f%%", temperature-30.0f, humidity /2-10.0f);
+                	// Post temperature and humidity data to cloud
+                http_request_t req1;
+                snprintf(req1.endpoint, sizeof(req1.endpoint), "/api/sensor_data");
+                snprintf(req1.json_body, sizeof(req1.json_body),
+                       "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"temperature\":%.1f,\"humidity\":%.1f}}",
+                       sensors[0].id, device_id, temperature/2-10.0f, humidity-30.0f);
+                xQueueSend(http_request_queue, &req1, 0);
+        	}
         }
+
+
+
+
+
+
+
 
     }
 }
@@ -781,7 +853,7 @@ void app_main(void)
     xTaskCreate(http_request_task, "http_request_task", 4096, NULL, 7, NULL);
 
     /* Run main loop in a separate task with a larger stack to avoid main‑task overflow */
-    xTaskCreatePinnedToCore(main_loop_task, "main_loop", 16384, NULL, 5, NULL, 0);
+    //xTaskCreatePinnedToCore(main_loop_task, "main_loop", 16384, NULL, 5, NULL, 0);
 	xTaskCreatePinnedToCore(second_loop_task, "second_loop", 8192, NULL, 6, NULL, 1);
     vTaskDelete(NULL);   // main task can exit now
 }

@@ -21,9 +21,11 @@ idf_component_register(
         console
         mbedtls
         mqtt
+        dht
 
-
+        EMBED_TXTFILES "certs/ca_cert.pem"
 
 )
 
 
+set(EXTRA_COMPONENT_DIRS components)
