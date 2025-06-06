@@ -1,4 +1,3 @@
-
 /*
  * SPDX-FileCopyrightText: 2010-2022 Espressif Systems (Shanghai) CO LTD
  *
@@ -99,7 +98,7 @@ typedef struct {
     char endpoint[64];
     char json_body[256];
 } http_request_t;
-#define HTTP_QUEUE_LENGTH 8
+#define HTTP_QUEUE_LENGTH 20
 static QueueHandle_t http_request_queue = NULL;
 
 
@@ -107,16 +106,60 @@ static QueueHandle_t http_request_queue = NULL;
 float zero_offset = 2.4;
 static bool registered = false; // flag to indicate if device is registered
 
+// Improved soil moisture reading with validation
+int read_soil_sensor() {
+    // Take multiple readings for stability
+    int readings[5] = {0};
+    for (int i = 0; i < 5; i++) {
+        readings[i] = adc1_get_raw(ADC1_CHANNEL_0);
+        vTaskDelay(pdMS_TO_TICKS(5)); // Small delay between readings
+    }
+    
+    // Sort readings to find median (more robust than average)
+    for (int i = 0; i < 4; i++) {
+        for (int j = i + 1; j < 5; j++) {
+            if (readings[i] > readings[j]) {
+                int temp = readings[i];
+                readings[i] = readings[j];
+                readings[j] = temp;
+            }
+        }
+    }
+    
+    // Return median reading
+    return readings[2];
+}
 
-
-
+// Improved HTTP request task with better error handling
 void http_request_task(void *arg) {
-    esp_task_wdt_add(NULL);
+    // esp_task_wdt_add(NULL);
     http_request_t req;
+    int consecutive_failures = 0;
+    
     while (1) {
         if (xQueueReceive(http_request_queue, &req, portMAX_DELAY)) {
-            esp_task_wdt_reset();
-            cloudflare_post_json(req.endpoint, req.json_body);
+            // esp_task_wdt_reset();
+            
+            // Log the request for debugging
+            ESP_LOGI("HTTP_REQUEST", "Processing request to %s", req.endpoint);
+            
+            esp_err_t result = cloudflare_post_json(req.endpoint, req.json_body);
+            
+            if (result == ESP_OK) {
+                consecutive_failures = 0;  // Reset failure counter on success
+            } else {
+                consecutive_failures++;
+                ESP_LOGW("HTTP_REQUEST", "Request failed (%d consecutive failures)", consecutive_failures);
+                
+                // If too many consecutive failures, add delay to prevent flooding
+                if (consecutive_failures > 5) {
+                    vTaskDelay(pdMS_TO_TICKS(1000 * (consecutive_failures - 5)));
+                    consecutive_failures = 5;  // Cap the counter
+                }
+            }
+            
+            // Small delay between requests to avoid overwhelming server
+            vTaskDelay(pdMS_TO_TICKS(50));
         }
     }
 }
@@ -437,10 +480,6 @@ void register_device(void)
     registered = true;
     free(sensors_buf);
 }
-// soil moisture sensor
-int read_soil_sensor() {
-    return adc1_get_raw(ADC1_CHANNEL_0); //
-}
 void set_soil_relay(bool on) {
     gpio_set_level(SOIL_RELAY_GPIO, on ? 1 : 0);
 }
@@ -573,38 +612,70 @@ static TaskHandle_t button_task_handle = NULL;
 // Manual relay state
 static bool relay_state = false;
 
-// Button task to handle relay toggling
+// Improved button task with robust HTTP request handling
 void button_task(void* arg) {
-    // ESP_LOGI("button_task", "Stack high-water mark at start: %u words",  uxTaskGetStackHighWaterMark(NULL));
+    ESP_LOGI("button_task", "Stack high-water mark at start: %u words",  uxTaskGetStackHighWaterMark(NULL));
+     // Use the HTTP request queue instead of direct API calls
+    http_request_t req1, req2;
+
+
+    char control_url[50];
+    snprintf(control_url, sizeof(control_url), "/api/controls?control_id=%d", sensors[3].id);
+    snprintf(req1.endpoint, sizeof(req1.endpoint), "%s", control_url);
+    snprintf(req2.endpoint, sizeof(req2.endpoint), "/api/messages");
     while (1) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-		vTaskDelay(pdMS_TO_TICKS(20));
+        vTaskDelay(pdMS_TO_TICKS(50)); // Longer debounce delay for reliability
+        
+        // Check button state again after debounce to confirm it's still pressed
+        if (gpio_get_level(TEST_BUTTON_GPIO) == 0) {
+            relay_state = !relay_state;
+            pump_on = relay_state;
+            set_soil_relay(relay_state);
 
-        relay_state = !relay_state;
-        pump_on = relay_state;
-        set_soil_relay(relay_state);
-        char control_url[50];
+            ESP_LOGW("Test Button", "Relay toggled to %s", relay_state ? "ON" : "OFF");
 
-        snprintf(control_url, sizeof(control_url), "/api/controls?control_id=%d", sensors[3].id);
-        if (pump_on){
-            cloudflare_post_message(device_id,sensors[3].id,"on",sensors[3].name);
-            cloudflare_put_json(control_url, "{\"state\":\"on\"}");
-
-        } else {
-            cloudflare_put_json(control_url, "{\"state\":\"off\"}");
-
-            cloudflare_post_message(device_id,sensors[3].id,"off",sensors[3].name);
+            if (pump_on) {
+                // Second request: control state update
+                snprintf(req1.json_body, sizeof(req1.json_body), "{\"state\":\"on\"}");
+                // First request: message
+                snprintf(req2.json_body, sizeof(req2.json_body),
+                        "{\"device_id\":%d,\"control_id\":%d,\"state\":\"on\",\"from_source\":\"%s\"}",
+                        device_id, sensors[3].id, sensors[3].name);
+            } else {
+                // First request: control state update
+                snprintf(req1.json_body, sizeof(req1.json_body), "{\"state\":\"off\"}");
+                // Second request: message
+                snprintf(req2.json_body, sizeof(req2.json_body),
+                        "{\"device_id\":%d,\"control_id\":%d,\"state\":\"off\",\"from_source\":\"%s\"}", 
+                        device_id, sensors[3].id, sensors[3].name);
+            }
+            
+            // Send both requests to the queue
+            if (xQueueSend(http_request_queue, &req1, pdMS_TO_TICKS(100)) != pdTRUE) {
+                ESP_LOGW("Button HTTP", "Failed to queue first request - queue full");
+            }
+            
+            if (xQueueSend(http_request_queue, &req2, pdMS_TO_TICKS(100)) != pdTRUE) {
+                ESP_LOGW("Button HTTP", "Failed to queue second request - queue full");
+            }
         }
-        ESP_LOGW("Test Button", "Manual toggle relay to %s", relay_state ? "ON" : "OFF");
     }
 }
 
-// ISR handler for test button
+// Improved test button interrupt handler with debouncing
 static void IRAM_ATTR test_button_isr_handler(void* arg) {
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    xTaskNotifyFromISR(button_task_handle, 0, eNoAction, &xHigherPriorityTaskWoken);
-    if (xHigherPriorityTaskWoken) {
-        portYIELD_FROM_ISR();
+    static uint32_t last_button_time = 0;
+    uint32_t current_time = xTaskGetTickCountFromISR();
+    
+    // Simple debounce - ignore interrupts that come too quickly after each other
+    if ((current_time - last_button_time) >= pdMS_TO_TICKS(300)) {
+        last_button_time = current_time;
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        xTaskNotifyFromISR(button_task_handle, 0, eNoAction, &xHigherPriorityTaskWoken);
+        if (xHigherPriorityTaskWoken) {
+            portYIELD_FROM_ISR();
+        }
     }
 }
 
@@ -621,6 +692,68 @@ static void setup_test_button_interrupt(void) {
     gpio_isr_handler_add(TEST_BUTTON_GPIO, test_button_isr_handler, NULL);
 }
 
+// Enhanced cloud controls handler
+void handle_cloud_controls(void) {
+    ESP_LOGW("ControlSync", "Checking cloud controls...");
+    
+    // Clear buffer before use
+    memset(controls_buf, 0, sizeof(controls_buf));
+    
+    esp_err_t fetch_result = cloudflare_get_json(url_control, controls_buf, sizeof(controls_buf));
+    if (fetch_result == ESP_OK) {
+        // Verify we got non-empty data
+        if (strlen(controls_buf) > 0) {
+            // Try to parse the JSON
+            cJSON *root = cJSON_Parse(controls_buf);
+            if (root == NULL) {
+                const char *error_ptr = cJSON_GetErrorPtr();
+                if (error_ptr != NULL) {
+                    ESP_LOGE("ControlSync", "JSON Parse Error before: %s", error_ptr);
+                }
+                ESP_LOGE("ControlSync", "Failed to parse response JSON: %s", controls_buf);
+                return;
+            }
+            
+            if (!cJSON_IsArray(root)) {
+                ESP_LOGE("ControlSync", "Expected JSON array but got something else");
+                cJSON_Delete(root);
+                return;
+            }
+            
+            int array_size = cJSON_GetArraySize(root);
+            for (int i = 0; i < array_size; i++) {
+                cJSON *item = cJSON_GetArrayItem(root, i);
+                cJSON *control_id_json = cJSON_GetObjectItem(item, "control_id");
+                cJSON *state_json = cJSON_GetObjectItem(item, "state");
+                if (control_id_json && state_json && cJSON_IsNumber(control_id_json) && cJSON_IsString(state_json)) {
+                    int control_id = control_id_json->valueint;
+                    const char* state = state_json->valuestring;
+                    
+                    // if control_id matches sensors[3].id (pump control)
+                    if (control_id == sensors[3].id) {
+                        if (strcmp(state, "on") == 0 && !pump_on) {
+                            set_soil_relay(true);
+                            pump_on = true;
+                            relay_state = true;
+                            ESP_LOGI("ControlSync", "Pump turned ON from cloud control.");
+                        } else if (strcmp(state, "off") == 0 && pump_on) {
+                            set_soil_relay(false);
+                            pump_on = false;
+                            relay_state = false;
+                            ESP_LOGI("ControlSync", "Pump turned OFF from cloud control.");
+                        }
+                    }
+                }
+            }
+            
+            cJSON_Delete(root);
+        } else {
+            ESP_LOGW("ControlSync", "Received empty response");
+        }
+    } else {
+        ESP_LOGW("ControlSync", "Failed to fetch controls: %s", esp_err_to_name(fetch_result));
+    }
+}
 
 // --------------------- main application loop task ------------------------
 static void main_loop_task(void *arg)
@@ -632,9 +765,6 @@ static void main_loop_task(void *arg)
     xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
     register_device();
 
-
-
-    // === Original body of app_main() starting after init(); ===
     // Wait for time to sync
     time_t now = 0;
     struct tm timeinfo = { 0 };
@@ -648,135 +778,97 @@ static void main_loop_task(void *arg)
     update_threshold_from_cloud();
 
     static int soil_read_counter = 0;
-    static int cloud_status_counter = 0;
+    TickType_t last_control_check = xTaskGetTickCount();
+    http_request_t req2, req3;
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(500)); // Delay for 0.5 seconds
-
-
-        if (++cloud_status_counter >= 4) { // Post status every 2 seconds
-            // get controls from cloud , compare updated_at timestamp
-            if (cloudflare_get_json(url_control, controls_buf, sizeof(controls_buf)) == ESP_OK) {
-                // Debug: print raw response content
-                ESP_LOGI("DEBUG", "Raw response content: %s", controls_buf);
-                cJSON *root = cJSON_Parse(controls_buf);
-                if (root == NULL) {
-                    //ESP_LOGE("DEBUG", "Failed to parse response JSON");
-                } else {
-                    if (!cJSON_IsArray(root)) {
-                        //ESP_LOGE("DEBUG", "Expected JSON array but got something else");
-                        cJSON_Delete(root);
-                    } else {
-                        int array_size = cJSON_GetArraySize(root);
-                        for (int i = 0; i < array_size; i++) {
-                            cJSON *item = cJSON_GetArrayItem(root, i);
-                            cJSON *control_id_json = cJSON_GetObjectItem(item, "control_id");
-                            cJSON *state_json = cJSON_GetObjectItem(item, "state");
-                            if (control_id_json && state_json && cJSON_IsNumber(control_id_json) && cJSON_IsString(state_json)) {
-                                int control_id = control_id_json->valueint;
-                                const char* state = state_json->valuestring;
-                                // if control_id matches sensors[3].id
-                                if (control_id == sensors[3].id) {
-                                    if (strcmp(state, "on") == 0 && !pump_on) {
-                                        set_soil_relay(true);
-                                        pump_on = true;
-                                        relay_state = true;
-                                        ESP_LOGI("ControlSync", "Pump turned ON from cloud control.");
-                                    } else if (strcmp(state, "off") == 0 && pump_on) {
-                                        set_soil_relay(false);
-                                        pump_on = false;
-                                        relay_state = false;
-                                        ESP_LOGI("ControlSync", "Pump turned OFF from cloud control.");
-                                    }
-                                }
-                            }
-                        }
-                        cJSON_Delete(root);
-                    }
-                }
-            }
-            cloud_status_counter = 0;
+        
+        if(soil_read_counter % 3 == 0) {
+            // Check cloud controls every 3 ticks (1.5 seconds)
+            handle_cloud_controls();
         }
 
-        // Read soil moisture sensor value every 3 seconds    500 ticks*6
+        // Read soil moisture sensor value every 3 seconds (500 ticks*6)
         if (++soil_read_counter >= 3) {
-            // Read soil moisture sensor value
+
+            // Read soil moisture with improved validation
             int moisture = read_soil_sensor();
-            // Post soil data to cloud
-            char soil_data[64];
-
+            
+            // Add better validation
             if (moisture < 200 || moisture > 4000) {
-                ESP_LOGE("Soil Moisture Sensor", "Invalid moisture value: %d", moisture);
-                // Skip this iteration if the value is out of range
+                ESP_LOGW("Soil Moisture Sensor", "Invalid moisture value: %d - skipping this reading", moisture);
             } else {
-				ESP_LOGW("Soil Moisture Sensor", "Moisture value: %d", moisture);
-				// ============ http async ======================
-                // snprintf(soil_data, sizeof(soil_data), "{\"moisture\":\"%d\"}", moisture);
-				http_request_t req1;
-				snprintf(req1.endpoint, sizeof(req1.endpoint), "/api/sensor_data");
-				snprintf(req1.json_body, sizeof(req1.json_body),
-         				"{\"sensor_id\":%d,\"device_id\":%d,\"data\":%s}",
-         				sensors[2].id, device_id, soil_data);
-				xQueueSend(http_request_queue, &req1, 0);
-				// ============ http async queue ======================
-
-                // cloudflare_post_sensor_data(sensors[2].id, device_id, soil_data);
+                ESP_LOGI("Soil Moisture Sensor", "Moisture value: %d", moisture);
+                
+                // Format the sensor data JSON properly
+                char soil_data[64];
+                snprintf(soil_data, sizeof(soil_data), "{\"moisture\":%d}", moisture);
+                
+                http_request_t req1;
+                snprintf(req1.endpoint, sizeof(req1.endpoint), "/api/sensor_data");
+                snprintf(req1.json_body, sizeof(req1.json_body),
+                        "{\"sensor_id\":%d,\"device_id\":%d,\"data\":%s}",
+                        sensors[2].id, device_id, soil_data);
+                xQueueSend(http_request_queue, &req1, pdMS_TO_TICKS(100));
 
                 char control_url[50];
                 snprintf(control_url, sizeof(control_url),
-                             "/api/controls?control_id=%d", sensors[3].id);
-                if (!pump_on && moisture > dry_threshold ) {
-
-                    // post relay status to cloud
+                         "/api/controls?control_id=%d", sensors[3].id);
+                //https://eee4464.terryh.workers.dev/api/controls?control_id=446400104
+                         
+                // Check if we need to turn on the pump (moisture too low/dry)
+                if (!pump_on && moisture > dry_threshold) {
                     set_soil_relay(true);
-					// ============ http async ======================
-
-                    // cloudflare_put_json(control_url, "{\"state\":\"on\"}");
-                    // cloudflare_post_message(device_id,sensors[3].id,"on",sensors[3].name);
-
-					http_request_t req2, req3;
-   					snprintf(req2.endpoint, sizeof(req2.endpoint), "%s", control_url);
-    				snprintf(req2.json_body, sizeof(req2.json_body), "{\"state\":\"on\"}");
-    				xQueueSend(http_request_queue, &req2, 0);
-
-    				snprintf(req3.endpoint, sizeof(req3.endpoint), "/api/messages");
-    				snprintf(req3.json_body, sizeof(req3.json_body),
-             				"{\"device_id\":%d,\"control_id\":%d,\"state\":\"on\",\"from_source\":\"%s\"}",
-             				device_id, sensors[3].id, sensors[3].name);
-    				xQueueSend(http_request_queue, &req3, 0);
-					// ============ http async queue ======================
-
-                    ESP_LOGW("Soil Moisture Sensor","Soil dry, pump ON\n");
                     pump_on = true;
                     relay_state = true;
-                } else if ( pump_on && moisture < wet_threshold ) {
-
-                    set_soil_relay(false);
-					// ============ http async ======================
-                    // only post at this point
-                    // cloudflare_put_json(control_url, "{\"state\":\"off\"}");
-                    // cloudflare_post_message(device_id,sensors[3].id,"off",sensors[3].name);
-                    http_request_t req2, req3;
+                    
                     snprintf(req2.endpoint, sizeof(req2.endpoint), "%s", control_url);
-                    snprintf(req2.json_body, sizeof(req2.json_body), "{\"state\":\"off\"}");
-                    xQueueSend(http_request_queue, &req2, 0);
+                    snprintf(req2.json_body, sizeof(req2.json_body), "{\"state\":\"on\"}");
+                    xQueueSend(http_request_queue, &req2, pdMS_TO_TICKS(100));
 
                     snprintf(req3.endpoint, sizeof(req3.endpoint), "/api/messages");
                     snprintf(req3.json_body, sizeof(req3.json_body),
-                             "{\"device_id\":%d,\"control_id\":%d,\"state\":\"off\",\"from_source\":\"%s\"}",
-                             device_id, sensors[3].id, sensors[3].name);
-                    xQueueSend(http_request_queue, &req3, 0);
-					// =========== http async queue ======================
+                            "{\"device_id\":%d,\"control_id\":%d,\"state\":\"on\",\"from_source\":\"%s\"}",
+                            device_id, sensors[3].id, sensors[3].name);
+                    xQueueSend(http_request_queue, &req3, pdMS_TO_TICKS(100));
 
+                    ESP_LOGW("Soil Moisture Sensor","Soil dry, pump ON");
+                } 
+                // Check if we need to turn off the pump (moisture high enough/wet)
+                else if (pump_on && moisture < wet_threshold) {
+                    set_soil_relay(false);
                     pump_on = false;
                     relay_state = false;
-                    ESP_LOGW("Soil Moisture Sensor","Soil wet, pump OFF\n");
+                    
+                    http_request_t req2, req3;
+                    snprintf(req2.endpoint, sizeof(req2.endpoint), "%s", control_url);
+                    snprintf(req2.json_body, sizeof(req2.json_body), "{\"state\":\"off\"}");
+                    xQueueSend(http_request_queue, &req2, pdMS_TO_TICKS(100));
+
+                    snprintf(req3.endpoint, sizeof(req3.endpoint), "/api/messages");
+                    snprintf(req3.json_body, sizeof(req3.json_body),
+                            "{\"device_id\":%d,\"control_id\":%d,\"state\":\"off\",\"from_source\":\"%s\"}",
+                            device_id, sensors[3].id, sensors[3].name);
+                    xQueueSend(http_request_queue, &req3, pdMS_TO_TICKS(100));
+
+                    ESP_LOGW("Soil Moisture Sensor","Soil wet, pump OFF");
                 }
+
+                // record pump state change
+                http_request_t req4;
+                snprintf(req4.endpoint, sizeof(req4.endpoint), "/api/sensor_data");
+                snprintf(req4.json_body, sizeof(req4.json_body),
+                        "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"pump_state\":%d}}",
+                        sensors[3].id, device_id, pump_on ? 1 : 0);
+                xQueueSend(http_request_queue, &req4, pdMS_TO_TICKS(100));
+
             }
             soil_read_counter = 0; // Reset counter after reading
         }
     }
 }
+
 	void calibrate_zero_offset() {
     	int raw = 0;
     	for (int i = 0; i < 256; ++i)
@@ -936,4 +1028,3 @@ void app_main(void)
 	xTaskCreatePinnedToCore(second_loop_task, "second_loop", 8192, NULL, 6, NULL, 1);
     vTaskDelete(NULL);   // main task can exit now
 }
-

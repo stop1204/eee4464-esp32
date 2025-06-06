@@ -4,13 +4,15 @@
 #include "esp_log.h"
 #include <string.h>
 #include <stdlib.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #define CLOUDFLARE_API_BASE_URL "https://eee4464.terryh.workers.dev"
 
 static const char *TAG = "cloudflare_api";
 static void (*on_data_sent_cb)(void) = NULL;
-static const int TIMEOUT_MS = 15000; // Default timeout for HTTP requests
-
+static const int TIMEOUT_MS = 5000; // Increased timeout for HTTP requests
+#define MAX_RETRIES 1  // Maximum number of retries for HTTP requests
 
 // Structure to hold data for the HTTP event handler
 typedef struct {
@@ -31,7 +33,7 @@ static esp_err_t _http_event_handler_for_get(esp_http_client_event_t *evt) {
             if (user_data) user_data->err_code = ESP_FAIL;
             break;
         case HTTP_EVENT_ON_CONNECTED:
-            // ESP_LOGI(TAG, "HTTP_EVENT_ON_CONNECTED");
+            ESP_LOGD(TAG, "HTTP_EVENT_ON_CONNECTED");
             break;
         case HTTP_EVENT_HEADER_SENT:
             // ESP_LOGI(TAG, "HTTP_EVENT_HEADER_SENT");
@@ -59,7 +61,7 @@ static esp_err_t _http_event_handler_for_get(esp_http_client_event_t *evt) {
             }
             break;
         case HTTP_EVENT_ON_FINISH:
-            // ESP_LOGI(TAG, "HTTP_EVENT_ON_FINISH");
+            ESP_LOGD(TAG, "HTTP_EVENT_ON_FINISH");
             if (user_data && user_data->buffer) {
                 if (user_data->bytes_written < user_data->buffer_size) {
                     user_data->buffer[user_data->bytes_written] = '\0'; // Null-terminate the buffer
@@ -70,7 +72,7 @@ static esp_err_t _http_event_handler_for_get(esp_http_client_event_t *evt) {
             }
             break;
         case HTTP_EVENT_DISCONNECTED:
-            // ESP_LOGI(TAG, "HTTP_EVENT_DISCONNECTED");
+            ESP_LOGD(TAG, "HTTP_EVENT_DISCONNECTED");
             // If an error wasn't already set, and we disconnected unexpectedly,
             // esp_http_client_perform() should return an error.
             // If not, this might indicate a premature disconnection.
@@ -81,116 +83,198 @@ static esp_err_t _http_event_handler_for_get(esp_http_client_event_t *evt) {
     return ESP_OK;
 }
 
-
-// POST any JSON data to any API endpoint
+// Enhanced POST with retry functionality
 esp_err_t cloudflare_post_json(const char *endpoint, const char *json_body) {
     char url[256];
     snprintf(url, sizeof(url), "%s%s", CLOUDFLARE_API_BASE_URL, endpoint);
-
-    esp_http_client_config_t config = {
-        .url = url,
-        .method = HTTP_METHOD_POST,
-        .event_handler = _http_event_handler_for_get, // Use the same handler as for GET
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = TIMEOUT_MS, // Set a timeout for the request
-
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_post_field(client, json_body, strlen(json_body));
-    esp_err_t err = esp_http_client_perform(client);
-
-    if (err == ESP_OK) {
-        // ESP_LOGI(TAG, "POST Success [%s]: %s", endpoint, json_body);
-        if (on_data_sent_cb) on_data_sent_cb();
-    } else {
-        ESP_LOGE(TAG, "POST Failed [%s]: %s", endpoint, esp_err_to_name(err));
+    
+    esp_err_t err = ESP_FAIL;
+    int retry_count = 0;
+    
+    while (retry_count <= MAX_RETRIES) {
+        if (retry_count > 0) {
+            // Exponential backoff
+            int delay_ms = 500 * (1 << (retry_count - 1)); // 500ms, 1000ms, 2000ms
+            ESP_LOGI(TAG, "Retrying POST [%s] (attempt %d/%d) after %dms delay", 
+                     endpoint, retry_count, MAX_RETRIES, delay_ms);
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        }
+        
+        esp_http_client_config_t config = {
+            .url = url,
+            .method = HTTP_METHOD_POST,
+            .event_handler = _http_event_handler_for_get,
+            .crt_bundle_attach = esp_crt_bundle_attach,
+            .timeout_ms = TIMEOUT_MS,
+            .buffer_size = 2048, // Increased buffer size
+            .buffer_size_tx = 1024,
+            .keep_alive_enable = false, // Disable keep-alive for cleaner connections
+        };
+        
+        esp_http_client_handle_t client = esp_http_client_init(&config);
+        esp_http_client_set_header(client, "Content-Type", "application/json");
+        esp_http_client_set_post_field(client, json_body, strlen(json_body));
+        
+        err = esp_http_client_perform(client);
+        
+        if (err == ESP_OK) {
+            int status_code = esp_http_client_get_status_code(client);
+            if (status_code >= 200 && status_code < 300) {
+                ESP_LOGI(TAG, "POST Success [%s]: %s", endpoint, json_body);
+                if (on_data_sent_cb) on_data_sent_cb();
+                esp_http_client_cleanup(client);
+                return ESP_OK;
+            } else {
+                ESP_LOGW(TAG, "POST received HTTP status %d for [%s]", status_code, endpoint);
+                err = ESP_FAIL; // Force retry on non-success HTTP status
+            }
+        } else {
+            ESP_LOGE(TAG, "POST Failed [%s]: %s", endpoint, esp_err_to_name(err));
+        }
+        
+        esp_http_client_cleanup(client);
+        retry_count++;
     }
-    esp_http_client_cleanup(client);
+    
+    ESP_LOGE(TAG, "POST Failed after %d retries [%s]", MAX_RETRIES, endpoint);
     return err;
 }
 
 /* ----------------------------------------------------------------------
- * HTTP PUT  (update existing resource)
+ * HTTP PUT with retry logic
  * --------------------------------------------------------------------*/
 esp_err_t cloudflare_put_json(const char *endpoint, const char *json_body)
 {
-    http_event_user_data_t user_data = {
-        .buffer        = NULL,
-        .buffer_size   = 0,
-        .bytes_written = 0,
-        .err_code      = ESP_OK
-    };
     char url[256];
     snprintf(url, sizeof(url), "%s%s", CLOUDFLARE_API_BASE_URL, endpoint);
-    esp_http_client_config_t config = {
-        .url               = url,   // macro concat
-        .method            = HTTP_METHOD_PUT,
-        .event_handler     = _http_event_handler_for_get,       // 與 POST 共用 handler
-        .user_data         = &user_data,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = TIMEOUT_MS, // Set a timeout for the request
-
-    };
-
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_post_field(client, json_body, strlen(json_body));
-
-    esp_err_t err = esp_http_client_perform(client);
-    if (err == ESP_OK && user_data.err_code == ESP_OK) {
-        ESP_LOGI(TAG, "PUT Success [%s]: %s", endpoint, json_body);
-    } else {
-        ESP_LOGE(TAG, "PUT Failed [%s]: %s", endpoint, esp_err_to_name(err));
-        if (err == ESP_OK) err = user_data.err_code;
+    
+    esp_err_t err = ESP_FAIL;
+    int retry_count = 0;
+    
+    while (retry_count <= MAX_RETRIES) {
+        if (retry_count > 0) {
+            // Exponential backoff
+            int delay_ms = 500 * (1 << (retry_count - 1)); // 500ms, 1000ms, 2000ms
+            ESP_LOGI(TAG, "Retrying PUT [%s] (attempt %d/%d) after %dms delay", 
+                     endpoint, retry_count, MAX_RETRIES, delay_ms);
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        }
+        
+        http_event_user_data_t user_data = {
+            .buffer = NULL,
+            .buffer_size = 0,
+            .bytes_written = 0,
+            .err_code = ESP_OK
+        };
+        
+        esp_http_client_config_t config = {
+            .url = url,
+            .method = HTTP_METHOD_PUT,
+            .event_handler = _http_event_handler_for_get,
+            .user_data = &user_data,
+            .crt_bundle_attach = esp_crt_bundle_attach,
+            .timeout_ms = TIMEOUT_MS,
+            .buffer_size = 2048, 
+            .buffer_size_tx = 1024,
+            .keep_alive_enable = false,
+        };
+        
+        esp_http_client_handle_t client = esp_http_client_init(&config);
+        esp_http_client_set_header(client, "Content-Type", "application/json");
+        esp_http_client_set_post_field(client, json_body, strlen(json_body));
+        
+        err = esp_http_client_perform(client);
+        
+        if (err == ESP_OK && user_data.err_code == ESP_OK) {
+            int status_code = esp_http_client_get_status_code(client);
+            if (status_code >= 200 && status_code < 300) {
+                ESP_LOGI(TAG, "PUT Success [%s]: %s", endpoint, json_body);
+                if (on_data_sent_cb) on_data_sent_cb();
+                esp_http_client_cleanup(client);
+                return ESP_OK;
+            } else {
+                ESP_LOGW(TAG, "PUT received HTTP status %d for [%s]", status_code, endpoint);
+                err = ESP_FAIL; // Force retry on non-success HTTP status
+            }
+        } else {
+            ESP_LOGE(TAG, "PUT Failed [%s]: %s", endpoint, esp_err_to_name(err));
+            if (err == ESP_OK) err = user_data.err_code;
+        }
+        
+        esp_http_client_cleanup(client);
+        retry_count++;
     }
-
-    esp_http_client_cleanup(client);
+    
+    ESP_LOGE(TAG, "PUT Failed after %d retries [%s]", MAX_RETRIES, endpoint);
     return err;
 }
 
-
-
-// GET JSON from any API endpoint
-
+// Enhanced GET with retry functionality
 esp_err_t cloudflare_get_json(const char *endpoint, char *buffer, int buffer_size) {
     char url[256];
     snprintf(url, sizeof(url), "%s%s", CLOUDFLARE_API_BASE_URL, endpoint);
+    
+    esp_err_t err = ESP_FAIL;
+    int retry_count = 0;
+    
+    while (retry_count <= MAX_RETRIES) {
+        if (retry_count > 0) {
+            // Clear buffer before retry
+            if (buffer && buffer_size > 0) {
+                buffer[0] = '\0';
+            }
+            
+            // Exponential backoff
+            int delay_ms = 500 * (1 << (retry_count - 1)); // 500ms, 1000ms, 2000ms
+            ESP_LOGI(TAG, "Retrying GET [%s] (attempt %d/%d) after %dms delay", 
+                     endpoint, retry_count, MAX_RETRIES, delay_ms);
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        }
 
-    /* Prepare a structure that the HTTP event handler will populate */
-    http_event_user_data_t user_data = {
-        .buffer        = buffer,
-        .buffer_size   = buffer_size,
-        .bytes_written = 0,
-        .err_code      = ESP_OK
-    };
+        /* Prepare a structure that the HTTP event handler will populate */
+        http_event_user_data_t user_data = {
+            .buffer = buffer,
+            .buffer_size = buffer_size,
+            .bytes_written = 0,
+            .err_code = ESP_OK
+        };
 
-    esp_http_client_config_t config = {
-        .url           = url,
-        .method        = HTTP_METHOD_GET,
-        .event_handler = _http_event_handler_for_get,
-        .user_data     = &user_data,
-        .buffer_size   = buffer_size,         /* use caller‑provided buffer to save RAM */
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = TIMEOUT_MS, // Set a timeout for the request
-        /* .buffer_size_tx can stay default (no body for GET) */
-    };
+        esp_http_client_config_t config = {
+            .url = url,
+            .method = HTTP_METHOD_GET,
+            .event_handler = _http_event_handler_for_get,
+            .user_data = &user_data,
+            .buffer_size = buffer_size + 512, // Additional buffer for processing
+            .crt_bundle_attach = esp_crt_bundle_attach,
+            .timeout_ms = TIMEOUT_MS,
+            .keep_alive_enable = false,
+        };
 
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-    esp_err_t err = esp_http_client_perform(client);
+        esp_http_client_handle_t client = esp_http_client_init(&config);
+        err = esp_http_client_perform(client);
 
-    if (err == ESP_OK && user_data.err_code == ESP_OK) {
-        ESP_LOGI(TAG, "GET Success [%s]", url);
-        // ESP_LOGI(TAG, "GET Success [%s]: %s", url, buffer);
-        // ESP_LOGI(TAG, "DEBUG: HTTP status code: %d", esp_http_client_get_status_code(client));
-    } else {
-        ESP_LOGE(TAG, "GET Failed [%s]: %s", endpoint, esp_err_to_name(err));
-        /* If perform() was OK but handler reported a problem, propagate that */
-        if (err == ESP_OK) err = user_data.err_code;
+        if (err == ESP_OK && user_data.err_code == ESP_OK) {
+            int status_code = esp_http_client_get_status_code(client);
+            if (status_code >= 200 && status_code < 300) {
+                ESP_LOGI(TAG, "GET Success [%s]", endpoint);
+                ESP_LOGD(TAG, "GET Response [%s]: %s", endpoint, buffer);
+                esp_http_client_cleanup(client);
+                return ESP_OK;
+            } else {
+                ESP_LOGW(TAG, "GET received HTTP status %d for [%s]", status_code, endpoint);
+                err = ESP_FAIL; // Force retry on non-success HTTP status
+            }
+        } else {
+            ESP_LOGE(TAG, "GET Failed [%s]: %s", endpoint, esp_err_to_name(err));
+            // If perform() was OK but handler reported a problem, propagate that
+            if (err == ESP_OK) err = user_data.err_code;
+        }
+
+        esp_http_client_cleanup(client);
+        retry_count++;
     }
-
-    esp_http_client_cleanup(client);
+    
+    ESP_LOGE(TAG, "GET Failed after %d retries [%s]", MAX_RETRIES, endpoint);
     return err;
 }
 
