@@ -401,30 +401,36 @@ void register_device(void)
     cloudflare_get_json("/api/devices", devices_buf, 1024);
     cloudflare_get_json("/api/sensors", sensors_buf, 1024);
 
-    // if device is already registered, contains device_id and sensor_id just skip
-    char keybuf[32];
-    snprintf(keybuf, sizeof(keybuf), "\"device_id\":%d", device_id);
-    if (strstr(devices_buf, keybuf) != NULL) {
-        free(devices_buf);
+    // Check if device is already registered
+    char device_check_key[64]; // Increased buffer size for safety
+    snprintf(device_check_key, sizeof(device_check_key), "\"device_id\":%d", device_id);
+
+    if (strstr(devices_buf, device_check_key) != NULL) {
+        ESP_LOGI(device_name, "Device %s (ID: %d) already registered. Skipping device registration.", device_name, device_id);
+    } else {
+        // Register the device only if not found
+        cloudflare_register_device(device_id, device_name, device_type);
+        ESP_LOGI(device_name, "Device registered with ID: %d, Name: %s, Type: %s", device_id, device_name, device_type);
     }
 
-    // Register the device
-    cloudflare_register_device(device_id, device_name, device_type);
-    ESP_LOGI(device_name,"Device registered with ID: %d, Name: %s, Type: %s", device_id, device_name, device_type);
-
-    // Register the sensor
+    // Register the sensors
     for (int i = 0; i < sensor_count; i++) {
-        int sensor_id = sensors[i].id;;
-        const char* sensor_name = sensors[i].name;
-        const char* sensor_type = sensors[i].type;
-        if (strstr(sensors_buf, "\"sensor_id\":") != NULL) {
-            // Sensor already registered, skip
-            ESP_LOGI(sensor_name,"Sensor %s already registered, skipping.", sensor_name);
-            continue;
+        int current_sensor_id = sensors[i].id; // Corrected typo (removed extra semicolon)
+        const char* current_sensor_name = sensors[i].name;
+        const char* current_sensor_type = sensors[i].type;
+
+        char sensor_check_key[64]; // Increased buffer size for safety
+        // Create the specific search string for the current sensor_id
+        snprintf(sensor_check_key, sizeof(sensor_check_key), "\"sensor_id\":%d", current_sensor_id);
+
+        if (strstr(sensors_buf, sensor_check_key) != NULL) {
+            // Sensor's specific ID found in the response, so it's already registered
+            ESP_LOGI(current_sensor_name, "Sensor %s (ID: %d) already registered, skipping.", current_sensor_name, current_sensor_id);
+        } else {
+            // Register this specific sensor if not found
+            cloudflare_register_sensor(current_sensor_id, device_id, current_sensor_name, current_sensor_type);
+            ESP_LOGI(current_sensor_name, "Sensor %s (ID: %d) registered.", current_sensor_name, current_sensor_id);
         }
-        // Register each sensor
-        cloudflare_register_sensor(sensor_id, device_id, sensor_name, sensor_type);
-        ESP_LOGI(sensor_name,"Sensor registered with ID: %d, Name: %s, Type: %s", sensor_id, sensor_name, sensor_type);
     }
 
     // a flag to indicate device registration
@@ -652,7 +658,7 @@ static void main_loop_task(void *arg)
             // get controls from cloud , compare updated_at timestamp
             if (cloudflare_get_json(url_control, controls_buf, sizeof(controls_buf)) == ESP_OK) {
                 // Debug: print raw response content
-                //ESP_LOGI("DEBUG", "Raw response content: %s", controls_buf);
+                ESP_LOGI("DEBUG", "Raw response content: %s", controls_buf);
                 cJSON *root = cJSON_Parse(controls_buf);
                 if (root == NULL) {
                     //ESP_LOGE("DEBUG", "Failed to parse response JSON");
@@ -852,8 +858,8 @@ static void second_loop_task(void *arg)
                 ESP_LOGI("RCWL", "🌫️ No motion.");
             }
 			snprintf(reqs[1].json_body, sizeof(reqs[1].json_body),
-                     "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"motion_detected\":%s}}",
-                     sensors[5].id, device_id, motion_count >= 4 ? "true" : "false");
+                     "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"motion_detected\":%d}}",
+                     sensors[5].id, device_id, motion_count >= 4 ? 1 : 0);
 
 			xQueueSend(http_request_queue, &reqs[1], 0);
 
