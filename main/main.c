@@ -98,7 +98,8 @@ typedef struct {
     char endpoint[64];
     char json_body[256];
 } http_request_t;
-#define HTTP_QUEUE_LENGTH 20
+// Increase queue length for more capacity
+#define HTTP_QUEUE_LENGTH 40
 static QueueHandle_t http_request_queue = NULL;
 
 
@@ -130,36 +131,90 @@ int read_soil_sensor() {
     return readings[2];
 }
 
-// Improved HTTP request task with better error handling
+// New function to safely send to queue with priority handling
+bool send_to_http_queue(http_request_t* req, int priority, TickType_t wait_ticks) {
+    // Check if this is a high priority request (like button control)
+    if (priority > 0) {
+        // For high priority requests, try to make space if queue is almost full
+        UBaseType_t spaces = uxQueueSpacesAvailable(http_request_queue);
+        if (spaces < 3) { // Almost full
+            http_request_t dummy;
+            ESP_LOGW("HTTP_QUEUE", "Queue almost full (%u spaces left), removing old items", spaces);
+            // Try to remove up to 5 items to make space for important requests
+            for (int i = 0; i < 5 && spaces < 5; i++) {
+                if (xQueueReceive(http_request_queue, &dummy, 0) == pdTRUE) {
+                    ESP_LOGW("HTTP_QUEUE", "Dropped request to %s to make space", dummy.endpoint);
+                    spaces++;
+                } else {
+                    break; // No more items to remove
+                }
+            }
+        }
+        // Try to send with higher timeout for important requests
+        return xQueueSend(http_request_queue, req, pdMS_TO_TICKS(300)) == pdTRUE;
+    }
+    
+    // For regular priority requests
+    return xQueueSend(http_request_queue, req, wait_ticks) == pdTRUE;
+}
+
+// Improved HTTP request task with better error handling and throughput
 void http_request_task(void *arg) {
-    // esp_task_wdt_add(NULL);
     http_request_t req;
     int consecutive_failures = 0;
     
     while (1) {
-        if (xQueueReceive(http_request_queue, &req, portMAX_DELAY)) {
-            // esp_task_wdt_reset();
-            
-            // Log the request for debugging
+        // Only wait 5 seconds maximum to check queue status periodically
+        if (xQueueReceive(http_request_queue, &req, pdMS_TO_TICKS(5000)) == pdTRUE) {
             ESP_LOGI("HTTP_REQUEST", "Processing request to %s", req.endpoint);
             
-            esp_err_t result = cloudflare_post_json(req.endpoint, req.json_body);
-            
-            if (result == ESP_OK) {
-                consecutive_failures = 0;  // Reset failure counter on success
+            // Process control requests first with proper method (PUT for controls)
+            if (strstr(req.endpoint, "/api/controls?control_id=") != NULL) {
+                esp_err_t result = cloudflare_put_json(req.endpoint, req.json_body);
+                if (result != ESP_OK) {
+                    ESP_LOGE("HTTP_REQUEST", "PUT control request failed: %s", esp_err_to_name(result));
+                    // For failed control requests, retry once immediately before continuing
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                    result = cloudflare_put_json(req.endpoint, req.json_body);
+                    if (result != ESP_OK) {
+                        ESP_LOGE("HTTP_REQUEST", "Control request retry failed: %s", esp_err_to_name(result));
+                    }
+                }
             } else {
-                consecutive_failures++;
-                ESP_LOGW("HTTP_REQUEST", "Request failed (%d consecutive failures)", consecutive_failures);
-                
-                // If too many consecutive failures, add delay to prevent flooding
-                if (consecutive_failures > 5) {
-                    vTaskDelay(pdMS_TO_TICKS(1000 * (consecutive_failures - 5)));
-                    consecutive_failures = 5;  // Cap the counter
+                // For non-control requests, use POST
+                esp_err_t result = cloudflare_post_json(req.endpoint, req.json_body);
+                if (result == ESP_OK) {
+                    consecutive_failures = 0;  // Reset failure counter on success
+                } else {
+                    consecutive_failures++;
+                    ESP_LOGW("HTTP_REQUEST", "Request failed (%d consecutive failures)", consecutive_failures);
+                    
+                    // Back off on repeated failures
+                    if (consecutive_failures > 5) {
+                        vTaskDelay(pdMS_TO_TICKS(500 * (consecutive_failures - 5)));
+                        // Cap counter to avoid excessive delays
+                        if (consecutive_failures > 10) consecutive_failures = 10;
+                    }
                 }
             }
             
+            // Report queue status periodically (every 10 requests)
+            static int request_count = 0;
+            if (++request_count % 10 == 0) {
+                UBaseType_t spaces = uxQueueSpacesAvailable(http_request_queue);
+                UBaseType_t msgs = HTTP_QUEUE_LENGTH - spaces;
+                ESP_LOGI("HTTP_QUEUE", "Status: %u messages in queue, %u spaces available", 
+                          msgs, spaces);
+            }
+            
             // Small delay between requests to avoid overwhelming server
-            vTaskDelay(pdMS_TO_TICKS(50));
+            vTaskDelay(pdMS_TO_TICKS(20)); // Reduced from 50ms
+        } else {
+            // No messages for 5 seconds, log queue status
+            UBaseType_t spaces = uxQueueSpacesAvailable(http_request_queue);
+            UBaseType_t msgs = HTTP_QUEUE_LENGTH - spaces;
+            ESP_LOGI("HTTP_QUEUE", "Idle - Status: %u messages in queue, %u spaces available", 
+                     msgs, spaces);
         }
     }
 }
@@ -612,20 +667,21 @@ static TaskHandle_t button_task_handle = NULL;
 // Manual relay state
 static bool relay_state = false;
 
-// Improved button task with robust HTTP request handling
+// Improved button task with robust HTTP request handling and retry logic
 void button_task(void* arg) {
-    ESP_LOGI("button_task", "Stack high-water mark at start: %u words",  uxTaskGetStackHighWaterMark(NULL));
-     // Use the HTTP request queue instead of direct API calls
+    ESP_LOGI("button_task", "Stack high-water mark at start: %u words", 
+             uxTaskGetStackHighWaterMark(NULL));
+    // Use the HTTP request queue instead of direct API calls
     http_request_t req1, req2;
-
 
     char control_url[50];
     snprintf(control_url, sizeof(control_url), "/api/controls?control_id=%d", sensors[3].id);
     snprintf(req1.endpoint, sizeof(req1.endpoint), "%s", control_url);
     snprintf(req2.endpoint, sizeof(req2.endpoint), "/api/messages");
+    
     while (1) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        vTaskDelay(pdMS_TO_TICKS(50)); // Longer debounce delay for reliability
+        vTaskDelay(pdMS_TO_TICKS(50)); // Debounce delay
         
         // Check button state again after debounce to confirm it's still pressed
         if (gpio_get_level(TEST_BUTTON_GPIO) == 0) {
@@ -635,29 +691,41 @@ void button_task(void* arg) {
 
             ESP_LOGW("Test Button", "Relay toggled to %s", relay_state ? "ON" : "OFF");
 
+            // Try up to 3 times to send control request
+            bool control_queued = false;
+            bool message_queued = false;
+            
             if (pump_on) {
-                // Second request: control state update
                 snprintf(req1.json_body, sizeof(req1.json_body), "{\"state\":\"on\"}");
-                // First request: message
                 snprintf(req2.json_body, sizeof(req2.json_body),
                         "{\"device_id\":%d,\"control_id\":%d,\"state\":\"on\",\"from_source\":\"%s\"}",
                         device_id, sensors[3].id, sensors[3].name);
             } else {
-                // First request: control state update
                 snprintf(req1.json_body, sizeof(req1.json_body), "{\"state\":\"off\"}");
-                // Second request: message
                 snprintf(req2.json_body, sizeof(req2.json_body),
                         "{\"device_id\":%d,\"control_id\":%d,\"state\":\"off\",\"from_source\":\"%s\"}", 
                         device_id, sensors[3].id, sensors[3].name);
             }
             
-            // Send both requests to the queue
-            if (xQueueSend(http_request_queue, &req1, pdMS_TO_TICKS(100)) != pdTRUE) {
-                ESP_LOGW("Button HTTP", "Failed to queue first request - queue full");
+            // Try sending control request with high priority
+            for (int retry = 0; retry < 1 && !control_queued; retry++) {
+                if (retry > 0) {
+                    ESP_LOGW("Button HTTP", "Retrying control request (attempt %d/3)", retry+1);
+                    vTaskDelay(pdMS_TO_TICKS(100 * retry));
+                }
+                control_queued = send_to_http_queue(&req1, 10, pdMS_TO_TICKS(200));
             }
             
-            if (xQueueSend(http_request_queue, &req2, pdMS_TO_TICKS(100)) != pdTRUE) {
-                ESP_LOGW("Button HTTP", "Failed to queue second request - queue full");
+            if (!control_queued) {
+                ESP_LOGE("Button HTTP", "Failed to queue control request after multiple attempts");
+                // As a fallback, try direct API call for critical state change
+                cloudflare_put_json(req1.endpoint, req1.json_body);
+            }
+            
+            // Message is less critical, just try once with priority 5
+            message_queued = send_to_http_queue(&req2, 5, pdMS_TO_TICKS(100));
+            if (!message_queued) {
+                ESP_LOGW("Button HTTP", "Failed to queue message request");
             }
         }
     }
@@ -795,10 +863,7 @@ static void main_loop_task(void *arg)
             // Read soil moisture with improved validation
             int moisture = read_soil_sensor();
             
-            // Add better validation
-            if (moisture < 200 || moisture > 4000) {
-                ESP_LOGW("Soil Moisture Sensor", "Invalid moisture value: %d - skipping this reading", moisture);
-            } else {
+            if (moisture >= 200 && moisture <= 4000) {
                 ESP_LOGI("Soil Moisture Sensor", "Moisture value: %d", moisture);
                 
                 // Format the sensor data JSON properly
@@ -810,12 +875,11 @@ static void main_loop_task(void *arg)
                 snprintf(req1.json_body, sizeof(req1.json_body),
                         "{\"sensor_id\":%d,\"device_id\":%d,\"data\":%s}",
                         sensors[2].id, device_id, soil_data);
-                xQueueSend(http_request_queue, &req1, pdMS_TO_TICKS(100));
+                send_to_http_queue(&req1, 0, pdMS_TO_TICKS(50));
 
                 char control_url[50];
                 snprintf(control_url, sizeof(control_url),
                          "/api/controls?control_id=%d", sensors[3].id);
-                //https://eee4464.terryh.workers.dev/api/controls?control_id=446400104
                          
                 // Check if we need to turn on the pump (moisture too low/dry)
                 if (!pump_on && moisture > dry_threshold) {
@@ -823,15 +887,16 @@ static void main_loop_task(void *arg)
                     pump_on = true;
                     relay_state = true;
                     
+                    http_request_t req2, req3;
                     snprintf(req2.endpoint, sizeof(req2.endpoint), "%s", control_url);
                     snprintf(req2.json_body, sizeof(req2.json_body), "{\"state\":\"on\"}");
-                    xQueueSend(http_request_queue, &req2, pdMS_TO_TICKS(100));
+                    send_to_http_queue(&req2, 5, pdMS_TO_TICKS(100));
 
                     snprintf(req3.endpoint, sizeof(req3.endpoint), "/api/messages");
                     snprintf(req3.json_body, sizeof(req3.json_body),
                             "{\"device_id\":%d,\"control_id\":%d,\"state\":\"on\",\"from_source\":\"%s\"}",
                             device_id, sensors[3].id, sensors[3].name);
-                    xQueueSend(http_request_queue, &req3, pdMS_TO_TICKS(100));
+                    send_to_http_queue(&req3, 0, pdMS_TO_TICKS(50));
 
                     ESP_LOGW("Soil Moisture Sensor","Soil dry, pump ON");
                 } 
@@ -844,13 +909,13 @@ static void main_loop_task(void *arg)
                     http_request_t req2, req3;
                     snprintf(req2.endpoint, sizeof(req2.endpoint), "%s", control_url);
                     snprintf(req2.json_body, sizeof(req2.json_body), "{\"state\":\"off\"}");
-                    xQueueSend(http_request_queue, &req2, pdMS_TO_TICKS(100));
+                    send_to_http_queue(&req2, 5, pdMS_TO_TICKS(100));
 
                     snprintf(req3.endpoint, sizeof(req3.endpoint), "/api/messages");
                     snprintf(req3.json_body, sizeof(req3.json_body),
                             "{\"device_id\":%d,\"control_id\":%d,\"state\":\"off\",\"from_source\":\"%s\"}",
                             device_id, sensors[3].id, sensors[3].name);
-                    xQueueSend(http_request_queue, &req3, pdMS_TO_TICKS(100));
+                    send_to_http_queue(&req3, 0, pdMS_TO_TICKS(50));
 
                     ESP_LOGW("Soil Moisture Sensor","Soil wet, pump OFF");
                 }
@@ -861,9 +926,11 @@ static void main_loop_task(void *arg)
                 snprintf(req4.json_body, sizeof(req4.json_body),
                         "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"pump_state\":%d}}",
                         sensors[3].id, device_id, pump_on ? 1 : 0);
-                xQueueSend(http_request_queue, &req4, pdMS_TO_TICKS(100));
-
+                send_to_http_queue(&req4, 0, pdMS_TO_TICKS(50));
+            } else {
+                ESP_LOGW("Soil Moisture Sensor", "Invalid moisture value: %d - skipping this reading", moisture);
             }
+            
             soil_read_counter = 0; // Reset counter after reading
         }
     }
@@ -931,7 +998,7 @@ static void second_loop_task(void *arg)
 			snprintf(reqs[0].json_body, sizeof(reqs[0].json_body),
                      "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"light_value\":%d,\"voltage\":%.2f}}",
                      sensors[6].id, device_id, light_value, photoresistor_voltage);
-			xQueueSend(http_request_queue, &reqs[0], 0);
+			send_to_http_queue(&reqs[0], 0, 0);  // Non-critical sensor data, don't wait
 
 
 
@@ -953,7 +1020,7 @@ static void second_loop_task(void *arg)
                      "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"motion_detected\":%d}}",
                      sensors[5].id, device_id, motion_count >= 4 ? 1 : 0);
 
-			xQueueSend(http_request_queue, &reqs[1], 0);
+			send_to_http_queue(&reqs[1], 0, 0);
 
 
 
@@ -972,7 +1039,7 @@ static void second_loop_task(void *arg)
             snprintf(reqs[2].json_body, sizeof(reqs[2].json_body),
                      "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"current\":%.2f}}",
                      sensors[4].id, device_id, current);
-            xQueueSend(http_request_queue, &reqs[2], 0);
+            send_to_http_queue(&reqs[2], 0, 0);
 
 
 
@@ -996,8 +1063,8 @@ static void second_loop_task(void *arg)
                 snprintf(reqs[4].json_body, sizeof(reqs[4].json_body),
                        "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"humidity\":%.1f}}",
                        sensors[1].id, device_id, humidity);
-                xQueueSend(http_request_queue, &reqs[3], 0);
-                xQueueSend(http_request_queue, &reqs[4], 0);
+                send_to_http_queue(&reqs[3], 0, 0);
+                send_to_http_queue(&reqs[4], 0, 0);
 
         	}
         }
