@@ -162,10 +162,12 @@ bool send_to_http_queue(http_request_t* req, int priority, TickType_t wait_ticks
 void http_request_task(void *arg) {
     http_request_t req;
     int consecutive_failures = 0;
+    esp_task_wdt_add(NULL);
     
     while (1) {
         // Only wait 5 seconds maximum to check queue status periodically
         if (xQueueReceive(http_request_queue, &req, pdMS_TO_TICKS(5000)) == pdTRUE) {
+            esp_task_wdt_reset();
             ESP_LOGI("HTTP_REQUEST", "Processing request to %s", req.endpoint);
             
             // Process control requests first with proper method (PUT for controls)
@@ -1000,6 +1002,8 @@ static void second_loop_task(void *arg)
                      "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"light_value\":%d,\"voltage\":%.2f}}",
                      sensors[6].id, device_id, light_value, photoresistor_voltage);
 			send_to_http_queue(&reqs[0], 0, 0);  // Non-critical sensor data, don't wait
+            //xQueueSend(http_request_queue, &reqs[0], 0);
+
 
 
 
@@ -1024,6 +1028,7 @@ static void second_loop_task(void *arg)
                      sensors[5].id, device_id, motion_count >= 4 ? 1 : 0);
 
 			send_to_http_queue(&reqs[1], 0, 0);
+            //xQueueSend(http_request_queue, &reqs[1], 0);
 
 
 
@@ -1042,7 +1047,8 @@ static void second_loop_task(void *arg)
             snprintf(reqs[2].json_body, sizeof(reqs[2].json_body),
                      "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"current\":%.2f}}",
                      sensors[4].id, device_id, current);
-            send_to_http_queue(&reqs[2], 0, 0);
+            //send_to_http_queue(&reqs[2], 0, 0);
+            xQueueSend(http_request_queue, &reqs[2], 0);
 
 
 
@@ -1066,8 +1072,10 @@ static void second_loop_task(void *arg)
                 snprintf(reqs[4].json_body, sizeof(reqs[4].json_body),
                        "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"humidity\":%.1f}}",
                        sensors[1].id, device_id, humidity);
-                send_to_http_queue(&reqs[3], 0, 0);
-                send_to_http_queue(&reqs[4], 0, 0);
+                //send_to_http_queue(&reqs[3], 0, 0);
+                //send_to_http_queue(&reqs[4], 0, 0);
+                xQueueSend(http_request_queue, &reqs[3], 0);
+                xQueueSend(http_request_queue, &reqs[4], 0);
 
         	}
         }
