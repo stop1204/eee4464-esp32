@@ -52,6 +52,9 @@
 #define ACS712_ADC_ATTEN   ADC_ATTEN_DB_11
 #define RCWL_GPIO GPIO_NUM_32 // RCWL-0516 sensor GPIO
 #define DHT_GPIO GPIO_NUM_0
+#define PHOTORESISTOR_ADC ADC2_CHANNEL_4 // for microwave radar sensor  GPIO15 ADC13
+#define PHOTORESISTOR_ADC_WIDTH ADC_WIDTH_BIT_12
+#define PHOTORESISTOR_ADC_ATTEN ADC_ATTEN_DB_11 // 11dB attenuation for 3.3V range
 
 
 extern const uint8_t ca_cert_pem_start[] asm("_binary_ca_cert_pem_start");
@@ -80,6 +83,8 @@ struct Sensor  sensors[] = {
 	{device_id * 100 + 3,"Soil Moisture Sensor" ,"Moisture"},
 	{device_id * 100 + 4,"Soil Replay Sensor" ,"Replay"},
     {device_id * 100 + 5,"ACS712 Hall Effect Sensor" ,"Current"},
+	{device_id * 100 + 6,"Microwave Radar Sensor" ,"Radar"},
+	{device_id * 100 + 7,"Photoresistor Sensor" ,"Light"},
 };
 const int sensor_count = sizeof(sensors) / sizeof(sensors[0]);
 
@@ -531,6 +536,12 @@ void init(void)
     adc1_config_width(ACS712_ADC_WIDTH);
     adc1_config_channel_atten(ACS712_ADC_CHANNEL, ACS712_ADC_ATTEN); // GPIO34
 
+	// photoresistor sensor config.
+	adc1_config_width(PHOTORESISTOR_ADC_WIDTH);
+	adc1_config_channel_atten(PHOTORESISTOR_ADC, PHOTORESISTOR_ADC_ATTEN); // ADC1_CHANNEL_13
+
+
+
     // microwave radar sensor config.
     setup_rcwl0516_sensor();
 }
@@ -793,6 +804,14 @@ static void second_loop_task(void *arg)
 
 	int current_count = 0;
 	float current = 0.0f;
+	int light_value = 0;
+	float photoresistor_voltage = 0.0f;
+	http_request_t reqs[5];
+	for (int i = 0; i < 5; ++i) {
+	    snprintf(reqs[i].endpoint, sizeof(reqs[i].endpoint), "/api/sensor_data");
+	}
+
+
 
     while (1) {
         // LED blink
@@ -807,13 +826,33 @@ static void second_loop_task(void *arg)
 		if (++current_count >= 4) { // every 2 seconds
             current_count = 0;
 
+			// Read photoresistor sensor
+			light_value = adc1_get_raw(PHOTORESISTOR_ADC); // 0-4095
+			photoresistor_voltage = (light_value / 4095.0) * 3.3; // convert to voltage
+			ESP_LOGI("Photoresistor", "💡Light value: %d, Voltage: %.2f V", light_value, photoresistor_voltage);
+			snprintf(reqs[0].json_body, sizeof(reqs[0].json_body),
+                     "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"light_value\":%d,\"voltage\":%.2f}}",
+                     sensors[6].id, device_id, light_value, photoresistor_voltage);
+
+
+
 			// Read RCWL-0516 sensor
-			int level = gpio_get_level(RCWL_GPIO);
-        	if (level == 1) {
-            	ESP_LOGI("RCWL", "🚶‍♂️ Motion detected!");
-        	} else {
-           		ESP_LOGI("RCWL", "🌫️ No motion.");
-        	}
+			// filter out false positives, if 4 out of 5 readings are high, consider it a motion
+            int motion_count = 0;
+            for (int i = 0; i < 5; ++i) {
+                if (gpio_get_level(RCWL_GPIO) == 1) {
+                    motion_count++;
+                }
+                vTaskDelay(pdMS_TO_TICKS(10)); // read every 10ms
+            }
+            if (motion_count >= 4) {
+                ESP_LOGI("RCWL", "🚶‍♂️ Motion detected!");
+            } else {
+                ESP_LOGI("RCWL", "🌫️ No motion.");
+            }
+			snprintf(reqs[1].json_body, sizeof(reqs[1].json_body),
+                     "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"motion_detected\":%s}}",
+                     sensors[5].id, device_id, motion_count >= 4 ? "true" : "false");
 
 
 
@@ -831,9 +870,7 @@ static void second_loop_task(void *arg)
 			// through MQTT post current data
 			snprintf(mqtt_payload, sizeof(mqtt_payload), "{\"current\":%.2f}", fabs(current));
 			esp_mqtt_client_publish(mqtt_client, "iot/current", mqtt_payload, 0, 1, 0);
-            http_request_t req;
-            snprintf(req.endpoint, sizeof(req.endpoint), "/api/sensor_data");
-            snprintf(req.json_body, sizeof(req.json_body),
+            snprintf(reqs[2].json_body, sizeof(reqs[2].json_body),
                      "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"current\":%.2f}}",
                      sensors[4].id, device_id, current);
             xQueueSend(http_request_queue, &req, 0);
@@ -854,14 +891,10 @@ static void second_loop_task(void *arg)
             	ESP_LOGI("DHT", "🌡️ Temperature: %.1f°C, 💧 Humidity: %.1f%%", temperature, humidity);
                 	// Post temperature and humidity data to cloud
                 // is one sensor but send two data to different sensors
-                http_request_t req1;
-                snprintf(req1.endpoint, sizeof(req1.endpoint), "/api/sensor_data");
-                snprintf(req1.json_body, sizeof(req1.json_body),
+                snprintf(reqs[3].json_body, sizeof(reqs[3].json_body),
                        "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"temperature\":%.1f}}",
                        sensors[0].id, device_id, temperature);
-                http_request_t req2;
-                snprintf(req2.endpoint, sizeof(req2.endpoint), "/api/sensor_data");
-                snprintf(req2.json_body, sizeof(req2.json_body),
+                snprintf(reqs[4].json_body, sizeof(reqs[4].json_body),
                        "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"humidity\":%.1f}}",
                        sensors[1].id, device_id, humidity);
                 xQueueSend(http_request_queue, &req1, 0);
