@@ -833,6 +833,7 @@ static void second_loop_task(void *arg)
 			snprintf(reqs[0].json_body, sizeof(reqs[0].json_body),
                      "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"light_value\":%d,\"voltage\":%.2f}}",
                      sensors[6].id, device_id, light_value, photoresistor_voltage);
+			xQueueSend(http_request_queue, &reqs[0], 0);
 
 
 
@@ -854,7 +855,7 @@ static void second_loop_task(void *arg)
                      "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"motion_detected\":%s}}",
                      sensors[5].id, device_id, motion_count >= 4 ? "true" : "false");
 
-
+			xQueueSend(http_request_queue, &reqs[1], 0);
 
 
 
@@ -873,7 +874,7 @@ static void second_loop_task(void *arg)
             snprintf(reqs[2].json_body, sizeof(reqs[2].json_body),
                      "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"current\":%.2f}}",
                      sensors[4].id, device_id, current);
-            xQueueSend(http_request_queue, &req, 0);
+            xQueueSend(http_request_queue, &reqs[2], 0);
 
 
 
@@ -897,8 +898,8 @@ static void second_loop_task(void *arg)
                 snprintf(reqs[4].json_body, sizeof(reqs[4].json_body),
                        "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"humidity\":%.1f}}",
                        sensors[1].id, device_id, humidity);
-                xQueueSend(http_request_queue, &req1, 0);
-                xQueueSend(http_request_queue, &req2, 0);
+                xQueueSend(http_request_queue, &reqs[3], 0);
+                xQueueSend(http_request_queue, &reqs[4], 0);
 
         	}
         }
