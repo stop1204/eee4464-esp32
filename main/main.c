@@ -848,11 +848,11 @@ static void main_loop_task(void *arg)
     static int soil_read_counter = 0;
     TickType_t last_control_check = xTaskGetTickCount();
     http_request_t req2, req3;
-
+    int moisture;
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(500)); // Delay for 0.5 seconds
         
-        if(soil_read_counter % 3 == 0) {
+        if(soil_read_counter % 2 == 0) {
             // Check cloud controls every 3 ticks (1.5 seconds)
             handle_cloud_controls();
         }
@@ -861,7 +861,7 @@ static void main_loop_task(void *arg)
         if (++soil_read_counter >= 3) {
 
             // Read soil moisture with improved validation
-            int moisture = read_soil_sensor();
+            moisture = read_soil_sensor();
             
             if (moisture >= 200 && moisture <= 4000) {
                 ESP_LOGI("Soil Moisture Sensor", "Moisture value: %d", moisture);
@@ -977,6 +977,7 @@ static void second_loop_task(void *arg)
 	}
 
 
+    int motion_count = 0;
 
     while (1) {
         // LED blink
@@ -1004,7 +1005,6 @@ static void second_loop_task(void *arg)
 
 			// Read RCWL-0516 sensor
 			// filter out false positives, if 4 out of 5 readings are high, consider it a motion
-            int motion_count = 0;
             for (int i = 0; i < 5; ++i) {
                 if (gpio_get_level(RCWL_GPIO) == 1) {
                     motion_count++;
@@ -1013,8 +1013,11 @@ static void second_loop_task(void *arg)
             }
             if (motion_count >= 4) {
                 ESP_LOGI("RCWL", "🚶‍♂️ Motion detected!");
+                motion_count = 0; // reset count if no motion detected
+
             } else {
                 ESP_LOGI("RCWL", "🌫️ No motion.");
+                motion_count = 0; // reset count if no motion detected
             }
 			snprintf(reqs[1].json_body, sizeof(reqs[1].json_body),
                      "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"motion_detected\":%d}}",
