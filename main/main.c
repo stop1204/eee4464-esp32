@@ -740,7 +740,7 @@ void button_task(void* arg) {
         vTaskDelay(pdMS_TO_TICKS(50)); // Debounce delay
 
         // Check button state again after debounce to confirm it's still pressed
-        if (gpio_get_level(WIFI_RESET_GPIO) == 0) {
+        if (gpio_get_level(TEST_BUTTON_GPIO) == 0) {
             relay_state = !relay_state;
             pump_on = relay_state;
             set_soil_relay(relay_state);
