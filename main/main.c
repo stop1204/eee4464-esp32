@@ -386,7 +386,7 @@ void wifi_setup(void) {
     // Wait for connection with 15s timeout
     if (xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(15000)) & WIFI_CONNECTED_BIT) {
         ESP_LOGI(TAG, "WiFi connected within 15s.");
-        /* Device registration now handled in main_loop_task to avoid main‑task stack overflow */
+        // Device registration now handled in main_loop_task to avoid main‑task stack overflow
     } else {
         ESP_LOGW(TAG, "WiFi not connected in 15s, switching to softAP mode.");
         setup_softap();
