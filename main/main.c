@@ -44,7 +44,7 @@
 #define SOIL_SENSOR_ADC_WIDTH ADC_WIDTH_BIT_12
 #define SOIL_SENSOR_ADC_ATTEN ADC_ATTEN_DB_11 // 11dB attenuation for 3.3V range
 #define SOIL_RELAY_GPIO GPIO_NUM_25
-#define TEST_BUTTON_GPIO GPIO_NUM_4 // GPIO0 for test button
+#define TEST_BUTTON_GPIO GPIO_NUM_4 // GPIO4 for test button
 #define MAX_CONTROLS_BUFFER 256
 #define ACS712_ADC_CHANNEL ADC1_CHANNEL_6  // GPIO34
 #define ACS712_ADC_WIDTH   ADC_WIDTH_BIT_12
@@ -54,7 +54,7 @@
 #define PHOTORESISTOR_ADC ADC2_CHANNEL_4 // for microwave radar sensor  GPIO15 ADC13
 #define PHOTORESISTOR_ADC_WIDTH ADC_WIDTH_BIT_12
 #define PHOTORESISTOR_ADC_ATTEN ADC_ATTEN_DB_11 // 11dB attenuation for 3.3V range
-
+bool is_ap_mode_enabled(void);
 
 extern const uint8_t ca_cert_pem_start[] asm("_binary_ca_cert_pem_start");
 extern const uint8_t ca_cert_pem_end[]   asm("_binary_ca_cert_pem_end");
@@ -107,6 +107,10 @@ static QueueHandle_t http_request_queue = NULL;
 float zero_offset = 2.4;
 static bool registered = false; // flag to indicate if device is registered
 
+
+static bool is_softap_mode = false;
+
+
 // Improved soil moisture reading with validation
 int read_soil_sensor() {
     // Take multiple readings for stability
@@ -115,7 +119,7 @@ int read_soil_sensor() {
         readings[i] = adc1_get_raw(ADC1_CHANNEL_0);
         vTaskDelay(pdMS_TO_TICKS(5)); // Small delay between readings
     }
-    
+
     // Sort readings to find median (more robust than average)
     for (int i = 0; i < 4; i++) {
         for (int j = i + 1; j < 5; j++) {
@@ -126,9 +130,13 @@ int read_soil_sensor() {
             }
         }
     }
-    
+
     // Return median reading
     return readings[2];
+}
+
+bool is_ap_mode_enabled(void) {
+    return is_softap_mode;
 }
 
 // New function to safely send to queue with priority handling
@@ -153,23 +161,26 @@ bool send_to_http_queue(http_request_t* req, int priority, TickType_t wait_ticks
         // Try to send with higher timeout for important requests
         return xQueueSend(http_request_queue, req, pdMS_TO_TICKS(300)) == pdTRUE;
     }
-    
+
     // For regular priority requests
     return xQueueSend(http_request_queue, req, wait_ticks) == pdTRUE;
 }
 
 // Improved HTTP request task with better error handling and throughput
 void http_request_task(void *arg) {
+
     http_request_t req;
     int consecutive_failures = 0;
     esp_task_wdt_add(NULL);
-    
+
     while (1) {
+
         // Only wait 5 seconds maximum to check queue status periodically
         if (xQueueReceive(http_request_queue, &req, pdMS_TO_TICKS(5000)) == pdTRUE) {
+
             esp_task_wdt_reset();
             ESP_LOGI("HTTP_REQUEST", "Processing request to %s", req.endpoint);
-            
+
             // Process control requests first with proper method (PUT for controls)
             if (strstr(req.endpoint, "/api/controls?control_id=") != NULL) {
                 esp_err_t result = cloudflare_put_json(req.endpoint, req.json_body);
@@ -190,7 +201,7 @@ void http_request_task(void *arg) {
                 } else {
                     consecutive_failures++;
                     ESP_LOGW("HTTP_REQUEST", "Request failed (%d consecutive failures)", consecutive_failures);
-                    
+
                     // Back off on repeated failures
                     if (consecutive_failures > 5) {
                         vTaskDelay(pdMS_TO_TICKS(500 * (consecutive_failures - 5)));
@@ -199,23 +210,23 @@ void http_request_task(void *arg) {
                     }
                 }
             }
-            
+
             // Report queue status periodically (every 10 requests)
             static int request_count = 0;
             if (++request_count % 10 == 0) {
                 UBaseType_t spaces = uxQueueSpacesAvailable(http_request_queue);
                 UBaseType_t msgs = HTTP_QUEUE_LENGTH - spaces;
-                ESP_LOGI("HTTP_QUEUE", "Status: %u messages in queue, %u spaces available", 
+                ESP_LOGI("HTTP_QUEUE", "Status: %u messages in queue, %u spaces available",
                           msgs, spaces);
             }
-            
+
             // Small delay between requests to avoid overwhelming server
             vTaskDelay(pdMS_TO_TICKS(20)); // Reduced from 50ms
         } else {
             // No messages for 5 seconds, log queue status
             UBaseType_t spaces = uxQueueSpacesAvailable(http_request_queue);
             UBaseType_t msgs = HTTP_QUEUE_LENGTH - spaces;
-            ESP_LOGI("HTTP_QUEUE", "Idle - Status: %u messages in queue, %u spaces available", 
+            ESP_LOGI("HTTP_QUEUE", "Idle - Status: %u messages in queue, %u spaces available",
                      msgs, spaces);
         }
     }
@@ -238,6 +249,8 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
         ESP_LOGI(TAG, "WiFi Connected.");
+        is_softap_mode = false; // Clear softAP mode flag
+
         // Optional: Set bit here if you want, but only set on IP_EVENT_STA_GOT_IP for real connection
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ESP_LOGI(TAG, "Got IP. WiFi connection SUCCESS!");
@@ -245,6 +258,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "Got IP Address: " IPSTR, IP2STR(&ip_info.ip));
         xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
         on_wifi_connected_notify();
+        is_softap_mode = false; // Clear softAP mode flag
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         ESP_LOGI(TAG, "Disconnected. Retry...");
         esp_wifi_connect();
@@ -361,6 +375,7 @@ void setup_softap();
 void  register_device();
 
 void wifi_setup(void) {
+
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -386,6 +401,7 @@ void wifi_setup(void) {
     // Wait for connection with 15s timeout
     if (xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(15000)) & WIFI_CONNECTED_BIT) {
         ESP_LOGI(TAG, "WiFi connected within 15s.");
+		is_softap_mode = false;
         // Device registration now handled in main_loop_task to avoid main‑task stack overflow
     } else {
         ESP_LOGW(TAG, "WiFi not connected in 15s, switching to softAP mode.");
@@ -423,25 +439,33 @@ void wifi_setup(void) {
 }
 
 void setup_softap() {
+    is_softap_mode = true;
+
+    // Create the default Wi-Fi AP netif
+    esp_netif_create_default_wifi_ap();
+
     wifi_config_t ap_config = {
         .ap = {
             .ssid = "ESP32_Group2",
             .ssid_len = strlen("ESP32_Group2"),
             .channel = 1,
-            //.password = "12345678",
+            .password = "",
             .max_connection = 4,
-            .authmode = WIFI_AUTH_WPA_WPA2_PSK
+            .authmode = WIFI_AUTH_OPEN
         },
     };
-/*    if (strlen("12345678") == 0) {
-        ap_config.ap.authmode = WIFI_AUTH_OPEN;
-    }
-*/
+
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "SoftAP started. SSID: %s", "ESP32_Group2");
+    esp_netif_ip_info_t ip_info;
+    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
+        ESP_LOGW(TAG, "SoftAP IP: " IPSTR, IP2STR(&ip_info.ip));
+    } else {
+        ESP_LOGW(TAG, "SoftAP IP: unknown");
+    }
 }
 
 void print_chip_info(void)
@@ -611,6 +635,28 @@ void init(void)
 
     ESP_LOGI("Initial","Welcome!");
     print_chip_info();
+
+    // --- WiFi Reset Button (GPIO16) check on boot ---
+    #define WIFI_RESET_GPIO GPIO_NUM_16
+    gpio_reset_pin(WIFI_RESET_GPIO);
+    gpio_set_direction(WIFI_RESET_GPIO, GPIO_MODE_INPUT);
+    gpio_pullup_en(WIFI_RESET_GPIO);
+    int held_duration = 0;
+    for (int i = 0; i < 50; ++i) {
+        if (gpio_get_level(WIFI_RESET_GPIO) == 0) {  // pressed (active low)
+            vTaskDelay(pdMS_TO_TICKS(100));
+            held_duration++;
+        } else {
+            break;
+        }
+    }
+    if (held_duration >= 50) {
+        ESP_LOGW("BOOT RESET", "BOOT button held >5s. Clearing WiFi config and restarting...");
+        nvs_flash_erase();  // Clear WiFi credentials and other NVS data
+        vTaskDelay(pdMS_TO_TICKS(500));
+        esp_restart();  // Auto restart
+    }
+
     // Set up Wi-Fi connection
     wifi_setup();
     // register_device() is now called in wifi_setup() if STA connects in 15s
@@ -629,10 +675,18 @@ void init(void)
     gpio_set_drive_capability(SOIL_RELAY_GPIO, GPIO_DRIVE_CAP_3);  // Max drive strength
     gpio_set_level(SOIL_RELAY_GPIO, 0);  // Set initial state to inactive (assuming active-low relay)
 
-    // Setup test button GPIO
+    // Setup test button GPIO and interrupt
     gpio_reset_pin(TEST_BUTTON_GPIO);
-    gpio_set_direction(TEST_BUTTON_GPIO, GPIO_MODE_INPUT);
-    gpio_set_pull_mode(TEST_BUTTON_GPIO, GPIO_PULLUP_ONLY);
+    // Configure test button as input with pull-up and negedge interrupt
+    gpio_config_t test_button_conf = {
+        .pin_bit_mask = 1ULL << TEST_BUTTON_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_NEGEDGE
+    };
+    gpio_config(&test_button_conf);
+    // Already configured via gpio_config_t, do not override
 
 	// ACS712 current sensor config.
     adc1_config_width(ACS712_ADC_WIDTH);
@@ -671,7 +725,7 @@ static bool relay_state = false;
 
 // Improved button task with robust HTTP request handling and retry logic
 void button_task(void* arg) {
-    ESP_LOGI("button_task", "Stack high-water mark at start: %u words", 
+    ESP_LOGI("button_task", "Stack high-water mark at start: %u words",
              uxTaskGetStackHighWaterMark(NULL));
     // Use the HTTP request queue instead of direct API calls
     http_request_t req1, req2;
@@ -680,13 +734,13 @@ void button_task(void* arg) {
     snprintf(control_url, sizeof(control_url), "/api/controls?control_id=%d", sensors[3].id);
     snprintf(req1.endpoint, sizeof(req1.endpoint), "%s", control_url);
     snprintf(req2.endpoint, sizeof(req2.endpoint), "/api/messages");
-    
+
     while (1) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         vTaskDelay(pdMS_TO_TICKS(50)); // Debounce delay
-        
+
         // Check button state again after debounce to confirm it's still pressed
-        if (gpio_get_level(TEST_BUTTON_GPIO) == 0) {
+        if (gpio_get_level(WIFI_RESET_GPIO) == 0) {
             relay_state = !relay_state;
             pump_on = relay_state;
             set_soil_relay(relay_state);
@@ -942,7 +996,7 @@ static void main_loop_task(void *arg)
     	int raw = 0;
     	for (int i = 0; i < 256; ++i)
         	raw += adc1_get_raw(ACS712_ADC_CHANNEL);
-    	zero_offset = (raw / 256.0) / 4095.0 * 3.3;
+    	zero_offset = (raw / 256.0) / 4095.0 * 5;
 		ESP_LOGI("ACS712", "Zero offset calibrated: %.2f V", zero_offset);
 	}
 static void second_loop_task(void *arg)
@@ -987,6 +1041,8 @@ static void second_loop_task(void *arg)
         gpio_set_level(LED_STATUS_GPIO, led_on);
 
         vTaskDelay(pdMS_TO_TICKS(500)); // 500ms delay
+
+        if (is_softap_mode) continue;  // Skip network operations in softAP mode
 
 		// caculate Vref and voltage (V), ESP32 ADC theoretical max is 4095 (12bit)
 		// 0 current,  voltage output Vcc/2 ~=> 2.5V  (input 5V)
@@ -1038,7 +1094,7 @@ static void second_loop_task(void *arg)
     		for (int i = 0; i < 64; ++i) {
         		raw += adc1_get_raw(ACS712_ADC_CHANNEL);
     		}
-			float voltage = (raw / 64.0) / 4095.0 * 3.3;
+			float voltage = (raw / 64.0) / 4095.0 * 5;
 			current = (voltage - zero_offset) / 0.185;
 			current = fabs(current);
 			// through MQTT post current data
@@ -1092,6 +1148,9 @@ static void second_loop_task(void *arg)
 void app_main(void)
 {
     init();
+    while(is_ap_mode_enabled()){
+            vTaskDelay(pdMS_TO_TICKS(1000)); // Wait 1 second before checking again
+    }
 
 	http_request_queue = xQueueCreate(HTTP_QUEUE_LENGTH, sizeof(http_request_t));
     xTaskCreate(http_request_task, "http_request_task", 16384, NULL, 7, NULL);

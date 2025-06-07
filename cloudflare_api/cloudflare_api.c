@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-
+#include "main.h"
 #define CLOUDFLARE_API_BASE_URL "https://eee4464.terryh.workers.dev"
 
 static const char *TAG = "cloudflare_api";
@@ -87,8 +87,12 @@ static esp_err_t _http_event_handler_for_get(esp_http_client_event_t *evt) {
 esp_err_t cloudflare_post_json(const char *endpoint, const char *json_body) {
     char url[256];
     snprintf(url, sizeof(url), "%s%s", CLOUDFLARE_API_BASE_URL, endpoint);
-    
+
     esp_err_t err = ESP_FAIL;
+    if (is_ap_mode_enabled()) {
+        ESP_LOGW("NETWORK", "In SoftAP mode, skip cloudflare_post_json");
+        return err;
+    }
     int retry_count = 0;
     
     while (retry_count <= MAX_RETRIES) {
@@ -147,8 +151,12 @@ esp_err_t cloudflare_put_json(const char *endpoint, const char *json_body)
 {
     char url[256];
     snprintf(url, sizeof(url), "%s%s", CLOUDFLARE_API_BASE_URL, endpoint);
-    
+
     esp_err_t err = ESP_FAIL;
+    if (is_ap_mode_enabled()) {
+        ESP_LOGW("NETWORK", "In SoftAP mode, skip cloudflare_post_json");
+        return err;
+    }
     int retry_count = 0;
     
     while (retry_count <= MAX_RETRIES) {
@@ -211,10 +219,18 @@ esp_err_t cloudflare_put_json(const char *endpoint, const char *json_body)
 
 // Enhanced GET with retry functionality
 esp_err_t cloudflare_get_json(const char *endpoint, char *buffer, int buffer_size) {
+    if (buffer == NULL || buffer_size <= 0) {
+        ESP_LOGE(TAG, "Invalid buffer or size for GET request");
+        return ESP_ERR_INVALID_ARG;
+    }
     char url[256];
     snprintf(url, sizeof(url), "%s%s", CLOUDFLARE_API_BASE_URL, endpoint);
     
     esp_err_t err = ESP_FAIL;
+    if (is_ap_mode_enabled()) {
+        ESP_LOGW("NETWORK", "In SoftAP mode, skip cloudflare_post_json");
+        return err;
+    }
     int retry_count = 0;
     
     while (retry_count <= MAX_RETRIES) {
@@ -292,6 +308,7 @@ void cloudflare_api_on_data_sent(void (*callback)(void)) {
  * @return esp_err_t ESP_OK on success, error code otherwise
  */
 esp_err_t cloudflare_register_device(int device_id, const char* device_name, const char* device_type) {
+
     char *json_body = malloc(256);
     if (!json_body) {
         ESP_LOGE(TAG, "No mem");
@@ -313,6 +330,7 @@ esp_err_t cloudflare_register_device(int device_id, const char* device_name, con
  * @return esp_err_t ESP_OK on success, error code otherwise
  */
 esp_err_t cloudflare_register_sensor(int sensor_id, int device_id, const char* sensor_name, const char* sensor_type) {
+
     char *json_body = malloc(256);
     if (!json_body) {
         ESP_LOGE(TAG, "No mem");
@@ -339,6 +357,7 @@ esp_err_t cloudflare_post_message(int device_id, int control_id, const char* sta
 /**
  * {"control_id":446400104,"state":"off","device_id":4464001,"from_source":"web"}
  */
+
     char *json_body = malloc(256);
     if (!json_body) {
         ESP_LOGE(TAG, "No mem");
