@@ -45,7 +45,7 @@
 #define SOIL_SENSOR_ADC_ATTEN ADC_ATTEN_DB_11 // 11dB attenuation for 3.3V range
 #define SOIL_RELAY_GPIO GPIO_NUM_25
 #define TEST_BUTTON_GPIO GPIO_NUM_4 // GPIO4 for test button
-#define MAX_CONTROLS_BUFFER 256
+#define MAX_CONTROLS_BUFFER 1024  // 從 256 增加到 1024
 #define ACS712_ADC_CHANNEL ADC1_CHANNEL_6  // GPIO34
 #define ACS712_ADC_WIDTH   ADC_WIDTH_BIT_12
 #define ACS712_ADC_ATTEN   ADC_ATTEN_DB_11
@@ -816,7 +816,7 @@ static void setup_test_button_interrupt(void) {
     gpio_isr_handler_add(TEST_BUTTON_GPIO, test_button_isr_handler, NULL);
 }
 
-// Enhanced cloud controls handler
+// 完全重寫的 cloud controls 處理函数
 void handle_cloud_controls(void) {
     ESP_LOGW("ControlSync", "Checking cloud controls...");
     
@@ -824,58 +824,62 @@ void handle_cloud_controls(void) {
     memset(controls_buf, 0, sizeof(controls_buf));
     
     esp_err_t fetch_result = cloudflare_get_json(url_control, controls_buf, sizeof(controls_buf));
-    if (fetch_result == ESP_OK) {
-        // Verify we got non-empty data
-        if (strlen(controls_buf) > 0) {
-            // Try to parse the JSON
-            cJSON *root = cJSON_Parse(controls_buf);
-            if (root == NULL) {
-                const char *error_ptr = cJSON_GetErrorPtr();
-                if (error_ptr != NULL) {
-                    ESP_LOGE("ControlSync", "JSON Parse Error before: %s", error_ptr);
-                }
-                ESP_LOGE("ControlSync", "Failed to parse response JSON: %s", controls_buf);
-                return;
-            }
-            
-            if (!cJSON_IsArray(root)) {
-                ESP_LOGE("ControlSync", "Expected JSON array but got something else");
-                cJSON_Delete(root);
-                return;
-            }
-            
-            int array_size = cJSON_GetArraySize(root);
-            for (int i = 0; i < array_size; i++) {
-                cJSON *item = cJSON_GetArrayItem(root, i);
-                cJSON *control_id_json = cJSON_GetObjectItem(item, "control_id");
-                cJSON *state_json = cJSON_GetObjectItem(item, "state");
-                if (control_id_json && state_json && cJSON_IsNumber(control_id_json) && cJSON_IsString(state_json)) {
-                    int control_id = control_id_json->valueint;
-                    const char* state = state_json->valuestring;
-                    
-                    // if control_id matches sensors[3].id (pump control)
-                    if (control_id == sensors[3].id) {
-                        if (strcmp(state, "on") == 0 && !pump_on) {
-                            set_soil_relay(true);
-                            pump_on = true;
-                            relay_state = true;
-                            ESP_LOGI("ControlSync", "Pump turned ON from cloud control.");
-                        } else if (strcmp(state, "off") == 0 && pump_on) {
-                            set_soil_relay(false);
-                            pump_on = false;
-                            relay_state = false;
-                            ESP_LOGI("ControlSync", "Pump turned OFF from cloud control.");
-                        }
-                    }
-                }
-            }
-            
-            cJSON_Delete(root);
-        } else {
-            ESP_LOGW("ControlSync", "Received empty response");
-        }
-    } else {
+    if (fetch_result != ESP_OK) {
         ESP_LOGW("ControlSync", "Failed to fetch controls: %s", esp_err_to_name(fetch_result));
+        return;
+    }
+    
+    if (strlen(controls_buf) == 0) {
+        ESP_LOGW("ControlSync", "Received empty response");
+        return;
+    }
+    
+    // 僅針對 Pump 控制（sensors[3].id）進行處理
+    // 這種方法不嘗試解析整個 JSON，只找出我們需要的 Pump 控制
+    char pump_control_id[16];
+    snprintf(pump_control_id, sizeof(pump_control_id), "\"%d\"", sensors[3].id);
+    
+    // 在原始 JSON 回應中搜索 pump 控制項
+    char *pump_control = strstr(controls_buf, pump_control_id);
+    if (pump_control == NULL) {
+        ESP_LOGI("ControlSync", "No pump control found in response");
+        return;
+    }
+    
+    // 在該控制項中尋找 "control_type":"switch" 以確認這是開關類型
+    char *control_type = strstr(pump_control, "\"control_type\":\"switch\"");
+    if (control_type == NULL) {
+        ESP_LOGI("ControlSync", "Pump control is not of switch type");
+        return;
+    }
+    
+    // 在該控制項中尋找狀態
+    char *state = strstr(pump_control, "\"state\":\"");
+    if (state == NULL) {
+        ESP_LOGI("ControlSync", "No state found for pump control");
+        return;
+    }
+    
+    // 移動指針到狀態值
+    state += 9; // 跳過 "state":"
+    
+    // 檢查狀態是否為 "on"
+    if (strncmp(state, "on\"", 3) == 0) {
+        if (!pump_on) {
+            set_soil_relay(true);
+            pump_on = true;
+            relay_state = true;
+            ESP_LOGI("ControlSync", "Pump turned ON from cloud control");
+        }
+    } 
+    // 檢查狀態是否為 "off"
+    else if (strncmp(state, "off\"", 4) == 0) {
+        if (pump_on) {
+            set_soil_relay(false);
+            pump_on = false;
+            relay_state = false;
+            ESP_LOGI("ControlSync", "Pump turned OFF from cloud control");
+        }
     }
 }
 
@@ -920,7 +924,7 @@ static void main_loop_task(void *arg)
             moisture = read_soil_sensor();
             
             if (moisture >= 200 && moisture <= 4000) {
-                ESP_LOGI("Soil Moisture Sensor", "Moisture value: %d", moisture);
+                ESP_LOGI("Soil Moisture Sensor", "🧴Moisture value: %d", moisture);
                 
                 // Format the sensor data JSON properly
                 char soil_data[64];
