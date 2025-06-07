@@ -38,6 +38,11 @@
 #include "freertos/queue.h"
 #include "mqtt_client.h"
 #include "esp_task_wdt.h"
+// --------------------------- Button Interrupt/Task Implementation -----------------------------
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
+
+
 // define GPIO
 #define LED_STATUS_GPIO GPIO_NUM_5
 #define SOIL_SENSOR_ADC ADC1_CHANNEL_0 // GPIO36
@@ -54,6 +59,14 @@
 #define PHOTORESISTOR_ADC ADC2_CHANNEL_4 // for microwave radar sensor  GPIO15 ADC13
 #define PHOTORESISTOR_ADC_WIDTH ADC_WIDTH_BIT_12
 #define PHOTORESISTOR_ADC_ATTEN ADC_ATTEN_DB_11 // 11dB attenuation for 3.3V range
+#define BUTTON_TASK_STACK 8192   // TLS + HTTP needs larger stack
+#define WIFI_RESET_GPIO GPIO_NUM_16
+
+
+static TaskHandle_t button_task_handle = NULL;
+
+// Manual relay state
+static bool relay_state = false;
 bool is_ap_mode_enabled(void);
 
 extern const uint8_t ca_cert_pem_start[] asm("_binary_ca_cert_pem_start");
@@ -89,7 +102,7 @@ const int sensor_count = sizeof(sensors) / sizeof(sensors[0]);
 
 // soil  moisture sensor configuration
 int dry_threshold = 3000;
-int wet_threshold = 1800;
+int wet_threshold = 2000;
 bool pump_on = false;
 
 
@@ -637,7 +650,6 @@ void init(void)
     print_chip_info();
 
     // --- WiFi Reset Button (GPIO16) check on boot ---
-    #define WIFI_RESET_GPIO GPIO_NUM_16
     gpio_reset_pin(WIFI_RESET_GPIO);
     gpio_set_direction(WIFI_RESET_GPIO, GPIO_MODE_INPUT);
     gpio_pullup_en(WIFI_RESET_GPIO);
@@ -712,16 +724,6 @@ void end(void)
     esp_restart();
 }
 
-
-#define BUTTON_TASK_STACK 8192   // TLS + HTTP needs larger stack
-// --------------------------- Button Interrupt/Task Implementation -----------------------------
-#include "freertos/queue.h"
-#include "freertos/semphr.h"
-
-static TaskHandle_t button_task_handle = NULL;
-
-// Manual relay state
-static bool relay_state = false;
 
 // Improved button task with robust HTTP request handling and retry logic
 void button_task(void* arg) {
@@ -908,7 +910,6 @@ static void main_loop_task(void *arg)
     static int soil_read_counter = 0;
     TickType_t last_control_check = xTaskGetTickCount();
     http_request_t req2, req3;
-    int moisture;
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(500)); // Delay for 0.5 seconds
         
@@ -917,82 +918,7 @@ static void main_loop_task(void *arg)
             handle_cloud_controls();
         }
 
-        // Read soil moisture sensor value every 3 seconds (500 ticks*6)
-        if (++soil_read_counter >= 3) {
 
-            // Read soil moisture with improved validation
-            moisture = read_soil_sensor();
-            
-            if (moisture >= 200 && moisture <= 4000) {
-                ESP_LOGI("Soil Moisture Sensor", "🧴Moisture value: %d", moisture);
-                
-                // Format the sensor data JSON properly
-                char soil_data[64];
-                snprintf(soil_data, sizeof(soil_data), "{\"moisture\":%d}", moisture);
-                
-                http_request_t req1;
-                snprintf(req1.endpoint, sizeof(req1.endpoint), "/api/sensor_data");
-                snprintf(req1.json_body, sizeof(req1.json_body),
-                        "{\"sensor_id\":%d,\"device_id\":%d,\"data\":%s}",
-                        sensors[2].id, device_id, soil_data);
-                send_to_http_queue(&req1, 0, pdMS_TO_TICKS(50));
-
-                char control_url[50];
-                snprintf(control_url, sizeof(control_url),
-                         "/api/controls?control_id=%d", sensors[3].id);
-                         
-                // Check if we need to turn on the pump (moisture too low/dry)
-                if (!pump_on && moisture > dry_threshold) {
-                    set_soil_relay(true);
-                    pump_on = true;
-                    relay_state = true;
-                    
-                    http_request_t req2, req3;
-                    snprintf(req2.endpoint, sizeof(req2.endpoint), "%s", control_url);
-                    snprintf(req2.json_body, sizeof(req2.json_body), "{\"state\":\"on\"}");
-                    send_to_http_queue(&req2, 5, pdMS_TO_TICKS(100));
-
-                    snprintf(req3.endpoint, sizeof(req3.endpoint), "/api/messages");
-                    snprintf(req3.json_body, sizeof(req3.json_body),
-                            "{\"device_id\":%d,\"control_id\":%d,\"state\":\"on\",\"from_source\":\"%s\"}",
-                            device_id, sensors[3].id, sensors[3].name);
-                    send_to_http_queue(&req3, 0, pdMS_TO_TICKS(50));
-
-                    ESP_LOGW("Soil Moisture Sensor","Soil dry, pump ON");
-                } 
-                // Check if we need to turn off the pump (moisture high enough/wet)
-                else if (pump_on && moisture < wet_threshold) {
-                    set_soil_relay(false);
-                    pump_on = false;
-                    relay_state = false;
-                    
-                    http_request_t req2, req3;
-                    snprintf(req2.endpoint, sizeof(req2.endpoint), "%s", control_url);
-                    snprintf(req2.json_body, sizeof(req2.json_body), "{\"state\":\"off\"}");
-                    send_to_http_queue(&req2, 5, pdMS_TO_TICKS(100));
-
-                    snprintf(req3.endpoint, sizeof(req3.endpoint), "/api/messages");
-                    snprintf(req3.json_body, sizeof(req3.json_body),
-                            "{\"device_id\":%d,\"control_id\":%d,\"state\":\"off\",\"from_source\":\"%s\"}",
-                            device_id, sensors[3].id, sensors[3].name);
-                    send_to_http_queue(&req3, 0, pdMS_TO_TICKS(50));
-
-                    ESP_LOGW("Soil Moisture Sensor","Soil wet, pump OFF");
-                }
-
-                // record pump state change
-                http_request_t req4;
-                snprintf(req4.endpoint, sizeof(req4.endpoint), "/api/sensor_data");
-                snprintf(req4.json_body, sizeof(req4.json_body),
-                        "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"pump_state\":%d}}",
-                        sensors[3].id, device_id, pump_on ? 1 : 0);
-                send_to_http_queue(&req4, 0, pdMS_TO_TICKS(50));
-            } else {
-                ESP_LOGW("Soil Moisture Sensor", "Invalid moisture value: %d - skipping this reading", moisture);
-            }
-            
-            soil_read_counter = 0; // Reset counter after reading
-        }
     }
 }
 
@@ -1038,6 +964,8 @@ static void second_loop_task(void *arg)
 
 
     int motion_count = 0;
+    int soil_read_counter=0;
+    int moisture=0;
 
     while (1) {
         // LED blink
@@ -1141,7 +1069,82 @@ static void second_loop_task(void *arg)
         }
 
 
+        // Read soil moisture sensor value every 3 seconds (500 ticks*6)
+        if (++soil_read_counter >= 3) {
 
+            // Read soil moisture with improved validation
+            moisture = read_soil_sensor();
+
+            if (moisture >= 200 && moisture <= 4000) {
+                ESP_LOGI("Soil Moisture Sensor", "🧴Moisture value: %d", moisture);
+
+                // Format the sensor data JSON properly
+                char soil_data[64];
+                snprintf(soil_data, sizeof(soil_data), "{\"moisture\":%d}", moisture);
+
+                http_request_t req1;
+                snprintf(req1.endpoint, sizeof(req1.endpoint), "/api/sensor_data");
+                snprintf(req1.json_body, sizeof(req1.json_body),
+                        "{\"sensor_id\":%d,\"device_id\":%d,\"data\":%s}",
+                        sensors[2].id, device_id, soil_data);
+                send_to_http_queue(&req1, 0, pdMS_TO_TICKS(50));
+
+                char control_url[50];
+                snprintf(control_url, sizeof(control_url),
+                         "/api/controls?control_id=%d", sensors[3].id);
+
+                // Check if we need to turn on the pump (moisture too low/dry)
+                if (!pump_on && moisture > dry_threshold) {
+                    set_soil_relay(true);
+                    pump_on = true;
+                    relay_state = true;
+
+                    http_request_t req2, req3;
+                    snprintf(req2.endpoint, sizeof(req2.endpoint), "%s", control_url);
+                    snprintf(req2.json_body, sizeof(req2.json_body), "{\"state\":\"on\"}");
+                    send_to_http_queue(&req2, 5, pdMS_TO_TICKS(100));
+
+                    snprintf(req3.endpoint, sizeof(req3.endpoint), "/api/messages");
+                    snprintf(req3.json_body, sizeof(req3.json_body),
+                            "{\"device_id\":%d,\"control_id\":%d,\"state\":\"on\",\"from_source\":\"%s\"}",
+                            device_id, sensors[3].id, sensors[3].name);
+                    send_to_http_queue(&req3, 0, pdMS_TO_TICKS(50));
+
+                    ESP_LOGW("Soil Moisture Sensor","Soil dry, pump ON");
+                }
+                // Check if we need to turn off the pump (moisture high enough/wet)
+                else if (pump_on && moisture < wet_threshold) {
+                    set_soil_relay(false);
+                    pump_on = false;
+                    relay_state = false;
+
+                    http_request_t req2, req3;
+                    snprintf(req2.endpoint, sizeof(req2.endpoint), "%s", control_url);
+                    snprintf(req2.json_body, sizeof(req2.json_body), "{\"state\":\"off\"}");
+                    send_to_http_queue(&req2, 5, pdMS_TO_TICKS(100));
+
+                    snprintf(req3.endpoint, sizeof(req3.endpoint), "/api/messages");
+                    snprintf(req3.json_body, sizeof(req3.json_body),
+                            "{\"device_id\":%d,\"control_id\":%d,\"state\":\"off\",\"from_source\":\"%s\"}",
+                            device_id, sensors[3].id, sensors[3].name);
+                    send_to_http_queue(&req3, 0, pdMS_TO_TICKS(50));
+
+                    ESP_LOGW("Soil Moisture Sensor","Soil wet, pump OFF");
+                }
+
+                // record pump state change
+                http_request_t req4;
+                snprintf(req4.endpoint, sizeof(req4.endpoint), "/api/sensor_data");
+                snprintf(req4.json_body, sizeof(req4.json_body),
+                        "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"pump_state\":%d}}",
+                        sensors[3].id, device_id, pump_on ? 1 : 0);
+                send_to_http_queue(&req4, 0, pdMS_TO_TICKS(50));
+            } else {
+                ESP_LOGW("Soil Moisture Sensor", "Invalid moisture value: %d - skipping this reading", moisture);
+            }
+
+            soil_read_counter = 0; // Reset counter after reading
+        }
 
 
 
