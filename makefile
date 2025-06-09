@@ -57,7 +57,7 @@ monitor:
 	fi
 m: monitor
 # 6. Run: get port then monitor
-run: port build flash monitor
+run: port compile flash monitor
 
 
 config:
