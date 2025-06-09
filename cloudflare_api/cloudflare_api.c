@@ -154,7 +154,7 @@ esp_err_t cloudflare_put_json(const char *endpoint, const char *json_body)
 
     esp_err_t err = ESP_FAIL;
     if (is_ap_mode_enabled()) {
-        ESP_LOGW("NETWORK", "In SoftAP mode, skip cloudflare_post_json");
+        ESP_LOGW("NETWORK", "In SoftAP mode, skip cloudflare_put_json");
         return err;
     }
     int retry_count = 0;
@@ -228,7 +228,7 @@ esp_err_t cloudflare_get_json(const char *endpoint, char *buffer, int buffer_siz
     
     esp_err_t err = ESP_FAIL;
     if (is_ap_mode_enabled()) {
-        ESP_LOGW("NETWORK", "In SoftAP mode, skip cloudflare_post_json");
+        ESP_LOGW("NETWORK", "In SoftAP mode, skip cloudflare_get_json");
         return err;
     }
     int retry_count = 0;
