@@ -58,7 +58,7 @@
 #define ACS712_ADC_ATTEN   ADC_ATTEN_DB_11
 #define RCWL_GPIO GPIO_NUM_32 // RCWL-0516 sensor GPIO
 #define DHT_GPIO GPIO_NUM_0
-#define PHOTORESISTOR_ADC ADC2_CHANNEL_4 // for microwave radar sensor  GPIO15 ADC13
+#define PHOTORESISTOR_ADC ADC1_CHANNEL_7 // for microwave radar sensor  GPIO15 ADC13
 #define PHOTORESISTOR_ADC_WIDTH ADC_WIDTH_BIT_12
 #define PHOTORESISTOR_ADC_ATTEN ADC_ATTEN_DB_11 // 11dB attenuation for 3.3V range
 #define BUTTON_TASK_STACK 8192   // TLS + HTTP needs larger stack
@@ -104,7 +104,6 @@ struct Sensor  sensors[] = {
         {device_id * 100 + 6,"Microwave Radar Sensor" ,"Radar"},
         {device_id * 100 + 7,"Photoresistor Sensor" ,"Light"},
         {device_id * 100 + 8,"Heart Rate Sensor" ,"HeartRate"},
-        {device_id * 100 + 9,"Blood Oxygen Sensor" ,"SpO2"},
 };
 const int sensor_count = sizeof(sensors) / sizeof(sensors[0]);
 
@@ -660,6 +659,7 @@ void init(void)
 {
 
     gpio_reset_pin(LED_STATUS_GPIO);
+    gpio_reset_pin(RCWL_GPIO);
     gpio_set_direction(LED_STATUS_GPIO, GPIO_MODE_OUTPUT);
     snprintf(url_control, sizeof(url_control), "/api/controls?device_id=%d", device_id);
 
@@ -1172,27 +1172,27 @@ static void second_loop_task(void *arg)
 }
 
 static void process_arduino_data(const char *data) {
+    // ESP_LOGI("UART", "Received: %s", data);
+    // if data include 'hr' then parse it as heart rate
+    // data:  {"hr":65}
+    if (strstr(data, "hr") == NULL) {
+        return; // no heart rate data
+    }
     ESP_LOGI("UART", "Received: %s", data);
+
     cJSON *root = cJSON_Parse(data);
     if (!root) return;
     cJSON *hr = cJSON_GetObjectItem(root, "hr");
-    cJSON *spo2 = cJSON_GetObjectItem(root, "spo2");
-    if (cJSON_IsNumber(hr) && cJSON_IsNumber(spo2)) {
+    if (cJSON_IsNumber(hr) ) {
         int heart = hr->valueint;
-        int oxy = spo2->valueint;
-        if (heart >= 40 && heart <= 180 && oxy >= 70 && oxy <= 100) {
-            http_request_t req1, req2;
+        if (heart >= 40 && heart <= 180 ) {
+            http_request_t req1;
             snprintf(req1.endpoint, sizeof(req1.endpoint), "/api/sensor_data");
             snprintf(req1.json_body, sizeof(req1.json_body),
                      "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"heart_rate\":%d}}",
                      sensors[7].id, device_id, heart);
             send_to_http_queue(&req1, 0, pdMS_TO_TICKS(50));
 
-            snprintf(req2.endpoint, sizeof(req2.endpoint), "/api/sensor_data");
-            snprintf(req2.json_body, sizeof(req2.json_body),
-                     "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"spo2\":%d}}",
-                     sensors[8].id, device_id, oxy);
-            send_to_http_queue(&req2, 0, pdMS_TO_TICKS(50));
         }
     }
     cJSON_Delete(root);
