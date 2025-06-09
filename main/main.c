@@ -39,6 +39,7 @@
 #include "freertos/queue.h"
 #include "mqtt_client.h"
 #include "esp_task_wdt.h"
+#include "driver/uart.h"
 // --------------------------- Button Interrupt/Task Implementation -----------------------------
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -62,6 +63,10 @@
 #define PHOTORESISTOR_ADC_ATTEN ADC_ATTEN_DB_11 // 11dB attenuation for 3.3V range
 #define BUTTON_TASK_STACK 8192   // TLS + HTTP needs larger stack
 #define WIFI_RESET_GPIO GPIO_NUM_16
+#define EX_UART_NUM UART_NUM_2
+#define UART_TX_PIN GPIO_NUM_21
+#define UART_RX_PIN GPIO_NUM_22
+#define UART_BUF_SIZE 1024
 
 
 static TaskHandle_t button_task_handle = NULL;
@@ -96,8 +101,10 @@ struct Sensor  sensors[] = {
 	{device_id * 100 + 3,"Soil Moisture Sensor" ,"Moisture"},
 	{device_id * 100 + 4,"Soil Replay Sensor" ,"Replay"},
     {device_id * 100 + 5,"ACS712 Hall Effect Sensor" ,"Current"},
-	{device_id * 100 + 6,"Microwave Radar Sensor" ,"Radar"},
-	{device_id * 100 + 7,"Photoresistor Sensor" ,"Light"},
+        {device_id * 100 + 6,"Microwave Radar Sensor" ,"Radar"},
+        {device_id * 100 + 7,"Photoresistor Sensor" ,"Light"},
+        {device_id * 100 + 8,"Heart Rate Sensor" ,"HeartRate"},
+        {device_id * 100 + 9,"Blood Oxygen Sensor" ,"SpO2"},
 };
 const int sensor_count = sizeof(sensors) / sizeof(sensors[0]);
 
@@ -209,7 +216,12 @@ void http_request_task(void *arg) {
                 }
             } else {
                 // For non-control requests, use POST
-                esp_err_t result = cloudflare_post_json(req.endpoint, req.json_body);
+                esp_err_t result;
+                if (strstr(req.endpoint, "/api/sensor_data") != NULL) {
+                    result = cloudflare_post_json_nowait(req.endpoint, req.json_body);
+                } else {
+                    result = cloudflare_post_json(req.endpoint, req.json_body);
+                }
                 if (result == ESP_OK) {
                     consecutive_failures = 0;  // Reset failure counter on success
                 } else {
@@ -254,6 +266,10 @@ void on_wifi_connected_notify(void) {
 void on_post_success() {
     // ESP_LOGI("Upload", "Data posted successfully.");
 }
+
+static void setup_uart2(void);
+static void uart_event_task(void *pvParameters);
+static void process_arduino_data(const char *data);
 
 // WiFi event handler
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
@@ -713,6 +729,7 @@ void init(void)
 
     // microwave radar sensor config.
     setup_rcwl0516_sensor();
+    setup_uart2();
 }
 void end(void)
 {
@@ -1153,6 +1170,57 @@ static void second_loop_task(void *arg)
 
     }
 }
+
+static void process_arduino_data(const char *data) {
+    ESP_LOGI("UART", "Received: %s", data);
+    cJSON *root = cJSON_Parse(data);
+    if (!root) return;
+    cJSON *hr = cJSON_GetObjectItem(root, "hr");
+    cJSON *spo2 = cJSON_GetObjectItem(root, "spo2");
+    if (cJSON_IsNumber(hr) && cJSON_IsNumber(spo2)) {
+        int heart = hr->valueint;
+        int oxy = spo2->valueint;
+        if (heart >= 40 && heart <= 180 && oxy >= 70 && oxy <= 100) {
+            http_request_t req1, req2;
+            snprintf(req1.endpoint, sizeof(req1.endpoint), "/api/sensor_data");
+            snprintf(req1.json_body, sizeof(req1.json_body),
+                     "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"heart_rate\":%d}}",
+                     sensors[7].id, device_id, heart);
+            send_to_http_queue(&req1, 0, pdMS_TO_TICKS(50));
+
+            snprintf(req2.endpoint, sizeof(req2.endpoint), "/api/sensor_data");
+            snprintf(req2.json_body, sizeof(req2.json_body),
+                     "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"spo2\":%d}}",
+                     sensors[8].id, device_id, oxy);
+            send_to_http_queue(&req2, 0, pdMS_TO_TICKS(50));
+        }
+    }
+    cJSON_Delete(root);
+}
+
+static void uart_event_task(void *pvParameters) {
+    uint8_t data[UART_BUF_SIZE];
+    while (1) {
+        int len = uart_read_bytes(EX_UART_NUM, data, UART_BUF_SIZE - 1, 100 / portTICK_PERIOD_MS);
+        if (len > 0) {
+            data[len] = 0;
+            process_arduino_data((char *)data);
+        }
+    }
+}
+
+static void setup_uart2(void) {
+    const uart_config_t uart_config = {
+        .baud_rate = 9600,
+        .data_bits = UART_DATA_8_BITS,
+        .parity    = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE
+    };
+    uart_driver_install(EX_UART_NUM, UART_BUF_SIZE * 2, 0, 0, NULL, 0);
+    uart_param_config(EX_UART_NUM, &uart_config);
+    uart_set_pin(EX_UART_NUM, UART_TX_PIN, UART_RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+}
 void app_main(void)
 {
     init();
@@ -1160,8 +1228,9 @@ void app_main(void)
             vTaskDelay(pdMS_TO_TICKS(1000)); // Wait 1 second before checking again
     }
 
-	http_request_queue = xQueueCreate(HTTP_QUEUE_LENGTH, sizeof(http_request_t));
+    http_request_queue = xQueueCreate(HTTP_QUEUE_LENGTH, sizeof(http_request_t));
     xTaskCreate(http_request_task, "http_request_task", 16384, NULL, 7, NULL);
+    xTaskCreate(uart_event_task, "uart_event_task", 4096, NULL, 8, NULL);
 
     /* Run main loop in a separate task with a larger stack to avoid main‑task overflow */
     xTaskCreatePinnedToCore(main_loop_task, "main_loop", 16384, NULL, 5, NULL, 0);
