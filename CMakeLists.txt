@@ -3,8 +3,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-
-set(EXTRA_COMPONENT_DIRS cloudflare_api)
+set(EXTRA_COMPONENT_DIRS cloudflare_api tests)
 
 # "Trim" the build. Include the minimal set of components, main, and anything it depends on.
 
