@@ -144,6 +144,32 @@ esp_err_t cloudflare_post_json(const char *endpoint, const char *json_body) {
     return err;
 }
 
+// Fire-and-forget POST without waiting for response
+esp_err_t cloudflare_post_json_nowait(const char *endpoint, const char *json_body) {
+    char url[256];
+    snprintf(url, sizeof(url), "%s%s", CLOUDFLARE_API_BASE_URL, endpoint);
+
+    if (is_ap_mode_enabled()) {
+        ESP_LOGW("NETWORK", "In SoftAP mode, skip cloudflare_post_json_nowait");
+        return ESP_FAIL;
+    }
+
+    esp_http_client_config_t config = {
+        .url = url,
+        .method = HTTP_METHOD_POST,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms = 1000,
+        .keep_alive_enable = true,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_open(client, strlen(json_body));
+    esp_http_client_write(client, json_body, strlen(json_body));
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    return ESP_OK;
+}
+
 /* ----------------------------------------------------------------------
  * HTTP PUT with retry logic
  * --------------------------------------------------------------------*/

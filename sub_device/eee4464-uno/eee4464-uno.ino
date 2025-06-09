@@ -4,83 +4,90 @@
 
 #include <Wire.h>
 #include "MAX30105.h"
-#include "heartRate.h"
+#include "spo2_algorithm.h"
 
 MAX30105 sensor;
-const int ledPin = 13; 
-unsigned long previousMillis[] =  {0, 0,0,0}; //
-bool ledState = LOW;
-const byte SAMPLE_COUNT = 4;
-byte bpmHistory[SAMPLE_COUNT];
-byte historyIndex = 0;
+const int ledPin = 13;
 
-long lastBeatTime = 0;
-float currentBPM = 0;
-int averageBPM = 0;
+#if defined(__AVR_ATmega328P__) || defined(__AVR_ATmega168__)
+uint16_t irBuffer[BUFFER_SIZE];
+uint16_t redBuffer[BUFFER_SIZE];
+#else
+uint32_t irBuffer[BUFFER_SIZE];
+uint32_t redBuffer[BUFFER_SIZE];
+#endif
+
+int32_t bufferLength;
+int32_t spo2 = 0;
+int8_t validSPO2 = 0;
+int32_t heartRate = 0;
+int8_t validHeartRate = 0;
+
+void sendDataToESP32(int hr, int spo2)
+{
+  Serial.print("{\"hr\":");
+  Serial.print(hr);
+  Serial.print(",\"spo2\":");
+  Serial.print(spo2);
+  Serial.println("}");
+}
 
 void setup() {
   Serial.begin(115200);
   Serial.println("Initializing MAX30102...");
   pinMode(ledPin, OUTPUT);
+
   if (!sensor.begin(Wire, I2C_SPEED_FAST)) {
     Serial.println("Sensor not found. Check wiring.");
     while (1);
   }
 
   sensor.setup();
-  sensor.setPulseAmplitudeRed(0x2F);   // Stronger LED for clearer signal
-  
+  sensor.setPulseAmplitudeRed(0x2F);
+
+  bufferLength = BUFFER_SIZE;
+  for (int i = 0; i < bufferLength; i++) {
+    while (sensor.available() == false)
+      sensor.check();
+    redBuffer[i] = sensor.getRed();
+    irBuffer[i] = sensor.getIR();
+    sensor.nextSample();
+  }
+
+  maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer,
+                                         &spo2, &validSPO2, &heartRate,
+                                         &validHeartRate);
 }
 
 void loop() {
-  unsigned long currentMillis = millis();
-
-  if (currentMillis - previousMillis[0] >= 500) {
-    previousMillis[0] = currentMillis;
-    ledState = !ledState;      
-    digitalWrite(ledPin, ledState);
+  // shift the old samples
+  for (byte i = 25; i < 100; i++) {
+    redBuffer[i - 25] = redBuffer[i];
+    irBuffer[i - 25] = irBuffer[i];
   }
 
-  heartbeat(); // cannot add delay for this function
+  // collect new samples
+  for (byte i = 75; i < 100; i++) {
+    while (sensor.available() == false)
+      sensor.check();
 
+    digitalWrite(ledPin, !digitalRead(ledPin));
 
-}
-
-void heartbeat(){
-  long ir = sensor.getIR();
-
-  if (checkForBeat(ir)) {
-    long currentTime = millis();
-    long interval = currentTime - lastBeatTime;
-    lastBeatTime = currentTime;
-
-    float bpm = 60.0 / (interval / 1000.0);
-    if (bpm >= 40 && bpm <= 180) {
-      bpmHistory[historyIndex] = (byte)bpm;
-      historyIndex = (historyIndex + 1) % SAMPLE_COUNT;
-
-      int total = 0;
-      for (byte i = 0; i < SAMPLE_COUNT; i++) {
-        total += bpmHistory[i];
-      }
-      averageBPM = total / SAMPLE_COUNT;
-      currentBPM = bpm;
-    }
+    redBuffer[i] = sensor.getRed();
+    irBuffer[i] = sensor.getIR();
+    sensor.nextSample();
   }
 
-  unsigned long currentMillis = millis();
+  maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer,
+                                         &spo2, &validSPO2, &heartRate,
+                                         &validHeartRate);
 
-  if (currentMillis - previousMillis[1] >= 500) {
-    previousMillis[1] = currentMillis;
-    
-    Serial.print("IR=");
-    Serial.print(ir);
-    Serial.print(" | BPM=");
-    Serial.print(currentBPM);
-    Serial.print(" | Avg BPM=");
-    Serial.print(averageBPM);
-    if (ir < 50000) Serial.print(" (No finger detected)");
-    Serial.println();
+  if (validHeartRate && validSPO2) {
+    sendDataToESP32(heartRate, spo2);
   }
 
+  Serial.print("HR=");
+  Serial.print(heartRate);
+  Serial.print(" SPO2=");
+  Serial.println(spo2);
 }

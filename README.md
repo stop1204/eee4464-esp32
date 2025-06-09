@@ -1,20 +1,53 @@
-# MacOS env.
-This is the documentation for Espressif IoT Development Framework (esp-idf). ESP-IDF is the official development framework for the ESP32, ESP32-S, ESP32-C, ESP32-H and ESP32-P Series SoCs.
+# ESP32 Sensor Hub Project
 
-This is not easy to start with, but it is worth it. The documentation is very good and the examples are well written.
+This project demonstrates a simple IoT sensor hub using an ESP32 and an Arduino Uno.
+The ESP32 collects data from a variety of sensors and pushes the values to a
+Cloudflare based API. An Arduino Uno equipped with a MAX30102 sensor provides
+heart rate and blood oxygen (SpO2) measurements which are transmitted to the
+ESP32 via UART.
 
-You need to install the toolchain and set up the environment before you can start using it. The documentation provides detailed instructions on how to do this, and then you can start with the examples.
-Such as the "Hello World" and "blink" examples, which are the first steps to get familiar with the framework.
-When you have completed the setup, you will be able to do more complex projects.
+## Features
 
-## Tips
-1. To remember the commands: I know there is a lot of commands that you may not familiar with, but you can use [Makefile](https://www.gnu.org/software/make/manual/make.html#Simple-Makefile) to automate the process. You can create a Makefile in the root directory of your project and add the commands you need to run. Then you can just run `make` to execute the commands.
-   This is a good tool to automate everywhere, not just in this environment. _Or you can just use my [Makefile](Makefile) to get started._
+- Temperature and humidity monitoring using a DHT sensor
+- Soil moisture sensing with automatic pump control
+- Current measurement (ACS712)
+- Light intensity and motion detection
+- Heart rate and SpO2 collection from an Arduino Uno over UART
+- Sensor data is validated and sent to the cloud through HTTP requests
+- Device and sensors are registered automatically on boot
 
-## References
-1. [Standard Toolchain Setup for Linux and *macOS*](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/get-started/linux-macos-setup.html)
-2. [ESP WIFI](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/network/esp_wifi.html)
-3. [ESP LOG](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/log.html)
-4. [ESP32 Internal Temperature Sensor with ESP-IDF](https://esp32tutorials.com/esp32-internal-temperature-sensor-esp-idf/)
-5. [Unit Test](https://github.com/espressif/esp-idf/blob/master/examples/system/unit_test/README.md)
-6. [MQ-2 Gas Sensor](https://www.nmking.io/index.php/2022/11/18/598/)
+## Requirements
+
+- [ESP-IDF](https://github.com/espressif/esp-idf) toolchain
+- A serial connection to the ESP32 board
+- An Arduino Uno with a MAX30102 sensor connected via I2C
+
+## Building and Flashing
+
+The provided `makefile` wraps common `idf.py` commands. Typical workflow:
+
+```bash
+make port       # detect serial port
+make compile    # build the firmware
+make flash      # flash to the detected port
+make monitor    # view serial output
+```
+
+For configuration run `make config` which invokes `idf.py menuconfig`.
+
+## Arduino Sketch
+
+The sketch located at `sub_device/eee4464-uno/eee4464-uno.ino` reads heart rate
+and SpO2 from the MAX30102 using the reference algorithm. Results are printed as
+JSON strings, e.g. `{"hr":75,"spo2":98}`, which are received by the ESP32.
+Upload this sketch with the standard Arduino IDE.
+
+## Running
+
+1. Flash the ESP32 firmware using the steps above.
+2. Upload the Arduino sketch to your Uno and connect its TX/RX pins (through a
+   level shifter) to GPIO21/GPIO22 on the ESP32.
+3. Once both devices are running, the ESP32 will log incoming heart rate and SpO2
+   readings and forward all validated sensor data to the cloud API.
+
+*** End of File ***

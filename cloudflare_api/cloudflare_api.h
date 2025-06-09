@@ -14,6 +14,7 @@
 // POST generic JSON data to any endpoint (e.g., sensor_data, controls, messages)
 // Example: cloudflare_post_json("/api/controls", "{\"mode\":\"auto\"}")
 esp_err_t cloudflare_post_json(const char *endpoint, const char *json_body);
+esp_err_t cloudflare_post_json_nowait(const char *endpoint, const char *json_body);
 esp_err_t cloudflare_put_json(const char *endpoint, const char *json_body);
 // GET JSON data from any endpoint (e.g., sensor_data, controls, messages)
 // buffer should be large enough to store the full response (e.g., 512-2048 bytes)
