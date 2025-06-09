@@ -3,7 +3,7 @@
 This project demonstrates a simple IoT sensor hub using an ESP32 and an Arduino Uno.
 The ESP32 collects data from a variety of sensors and pushes the values to a
 Cloudflare based API. An Arduino Uno equipped with a MAX30102 sensor provides
-heart rate and blood oxygen (SpO2) measurements which are transmitted to the
+heart rate which is transmitted to the
 ESP32 via UART.
 
 ## Features
@@ -12,7 +12,7 @@ ESP32 via UART.
 - Soil moisture sensing with automatic pump control
 - Current measurement (ACS712)
 - Light intensity and motion detection
-- Heart rate and SpO2 collection from an Arduino Uno over UART
+- Heart rate from an Arduino Uno over UART
 - Sensor data is validated and sent to the cloud through HTTP requests
 - Device and sensors are registered automatically on boot
 
@@ -49,5 +49,3 @@ Upload this sketch with the standard Arduino IDE.
    level shifter) to GPIO21/GPIO22 on the ESP32.
 3. Once both devices are running, the ESP32 will log incoming heart rate and SpO2
    readings and forward all validated sensor data to the cloud API.
-
-*** End of File ***
