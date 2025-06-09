@@ -2,6 +2,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include <string.h>
 
 #define DHT_DATA_BITS 40
 #define DHT_MAX_TIMINGS 85
@@ -30,7 +31,7 @@ static int dht_read_raw(gpio_num_t pin, uint8_t data[5]) {
         timings[i] = count;
     }
 
-    for (int i = 4; i < DHT_MAX_TIMINGS; i += 2) {
+    for (int i = 4; i < DHT_MAX_TIMINGS - 1; i += 2) {
         int low = timings[i];
         int high = timings[i + 1];
         if (low == 0 || high == 0) continue;

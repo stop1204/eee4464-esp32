@@ -14,6 +14,7 @@
 #include "esp_system.h"
 #include <sys/param.h>
 #include <time.h>
+#include <string.h>
 #include "dht.h"
 #include "esp_netif_ip_addr.h"
 
