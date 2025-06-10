@@ -1,0 +1,33 @@
+@startuml
+' detail：http_request_task upload data logic
+title HTTP Request Processing
+
+start
+repeat
+  :wait for request (5s);
+  if (request received?) then (yes)
+    if (endpoint has "/api/controls?control_id=") then (control)
+      :cloudflare_put_json();
+      if (failed?) then (yes)
+        :retry once;
+      endif
+    else
+      if (endpoint == "/api/sensor_data") then (sensor)
+        :cloudflare_post_json_nowait();
+      else
+        :cloudflare_post_json();
+      endif
+      if (success) then (yes)
+        :reset failure counter;
+      else (no)
+        :increment failure counter;
+        if (failures > 5) then
+          :backoff delay;
+        endif
+      endif
+    endif
+  else (timeout)
+    :log queue status;
+  endif
+repeat while (true)
+@enduml

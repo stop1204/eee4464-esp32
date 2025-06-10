@@ -1,0 +1,46 @@
+@startuml
+' detail：second_loop_task 
+title Sensor Acquisition & Pump Control
+
+start
+:second_loop_task starts;
+repeat
+  :Blink LED;
+  if (is_softap_mode?) then (yes)
+    :skip network actions;
+  else (no)
+   
+  endif
+
+  :Read photoresistor;
+  :enqueue light data;
+
+  :Read RCWL sensor (5 samples);
+  :enqueue motion result;
+
+  :Read ACS712 current;
+  :publish MQTT current;
+  :enqueue current data;
+
+  :Read DHT temperature & humidity;
+  :enqueue temperature data;
+  :enqueue humidity data;
+
+  if (soil_read_counter >= 3) then (yes)
+    :Read soil moisture;
+    :enqueue moisture data;
+    if (pump_off and moisture > dry_threshold) then (dry)
+       :set_soil_relay(on);
+       :enqueue control PUT on;
+       :enqueue message ON;
+    else if (pump_on and moisture < wet_threshold) then (wet)
+       :set_soil_relay(off);
+       :enqueue control PUT off;
+       :enqueue message OFF;
+    endif
+    :enqueue pump state;
+    :reset soil_read_counter;
+  else (no)
+  endif
+repeat while (true)
+@enduml

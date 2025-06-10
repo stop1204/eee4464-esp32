@@ -1,0 +1,37 @@
+@startuml
+' modules structure： main components
+title ESP32 Sensor Hub Architecture
+
+package "ESP32 Firmware" {
+  [app_main] as APP
+  [WiFi Manager] as WIFI
+  [HTTP Server (SoftAP)] as SOFTAP
+  [Sensor Manager] as SENSORS
+  [UART Handler] as UART
+  [HTTP Request Queue] as QUEUE
+  [Cloud Control Handler] as CONTROL
+  [Relay Control] as RELAY
+}
+
+package "Cloudflare Integration" {
+  [cloudflare_api.c] as CF_API
+}
+[Cloudflare Service] as CF_SERVER
+[Web Client]
+[Arduino Uno + MAX30102] as UNO
+component "Sensors\n(DHT, Soil, Light,\nRCWL, ACS712)" as EXT_SENS
+
+APP --> WIFI
+WIFI --> SOFTAP
+WIFI --> CF_API
+SENSORS --> EXT_SENS
+SENSORS --> QUEUE
+UART --> QUEUE
+QUEUE --> CF_API
+CF_API --> CF_SERVER
+CONTROL --> CF_API
+CONTROL --> RELAY
+SENSORS --> RELAY
+SOFTAP --> [Web Client]
+UNO --> UART
+@enduml

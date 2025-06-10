@@ -1,0 +1,32 @@
+@startuml
+package "ESP32 Sensor Hub" {
+    [ESP32] as esp32
+    [WiFi / HTTP] as wifi
+    [UART Handler] as uart
+    [HTTP Request Queue] as queue
+    [Cloudflare API] as cloud
+
+    [DHT Sensor] as dht
+    [Soil Moisture] as soil
+    [ACS712] as acs
+    [RCWL-0516] as radar
+    [Photoresistor] as photo
+    [Pump Relay] as relay
+
+    [Arduino UNO] as uno
+    [MAX30102] as max
+}
+
+uno --> esp32 : UART JSON\n{ "hr": ... }
+max --> uno : I2C
+esp32 --> wifi
+wifi --> cloud : HTTPS
+esp32 --> queue
+dht --> esp32
+soil --> esp32
+acs --> esp32
+radar --> esp32
+photo --> esp32
+esp32 --> relay : control
+
+@enduml

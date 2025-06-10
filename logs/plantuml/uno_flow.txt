@@ -1,0 +1,13 @@
+@startuml
+start
+:setup();
+:initialize Serial and MAX30102;
+repeat
+  :read IR value;
+  if (checkForBeat?) then (yes)
+    :compute BPM;
+    :update average BPM;
+    :sendDataToESP32(average);
+  endif
+repeat while (true)
+@enduml

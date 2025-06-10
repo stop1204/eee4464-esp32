@@ -1,0 +1,22 @@
+@startuml
+' main flow：app_main and init
+title Main Execution Flow
+
+start
+:app_main();
+:init hardware and WiFi;
+if (STA connected?) then (yes)
+  :WiFi connected;
+else (no)
+  :setup_softap();
+  :launch HTTP server for WiFi config;
+  :wait for credentials and reconnect;
+endif
+:create HTTP queue;
+:start tasks (http_request_task, uart_event_task, main_loop_task);
+while (device not registered?)
+  :wait;
+endwhile
+:start second_loop_task (sensors);
+stop
+@enduml

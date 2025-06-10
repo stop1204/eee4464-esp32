@@ -1,0 +1,19 @@
+@startuml
+start
+:app_main();
+:call init();
+while (softAP mode)
+  :wait for WiFi config;
+endwhile
+:create HTTP queue;
+fork
+  :http_request_task\nprocess queue;
+fork again
+  :uart_event_task\nread UART -> process_arduino_data;
+fork again
+  :main_loop_task\nwait WiFi -> register_device\nloop handle_cloud_controls & soil sensor & pump control;
+fork again
+  :second_loop_task\nblink LED\nread sensors & queue data;
+end fork
+stop
+@enduml
