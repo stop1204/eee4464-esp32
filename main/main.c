@@ -68,6 +68,15 @@
 #define UART_RX_PIN GPIO_NUM_22
 #define UART_BUF_SIZE 1024
 
+// MQTT topics for sensors
+#define MQTT_TOPIC_TEMPERATURE "iot/temperature"
+#define MQTT_TOPIC_HUMIDITY    "iot/humidity"
+#define MQTT_TOPIC_MOISTURE    "iot/moisture"
+#define MQTT_TOPIC_PUMP        "iot/pump"
+#define MQTT_TOPIC_LIGHT       "iot/light"
+#define MQTT_TOPIC_MOTION      "iot/motion"
+#define MQTT_TOPIC_HEART_RATE  "iot/heart_rate"
+#define MQTT_TOPIC_CURRENT     "iot/current"
 
 static TaskHandle_t button_task_handle = NULL;
 
@@ -130,6 +139,9 @@ static bool registered = false; // flag to indicate if device is registered
 
 static bool is_softap_mode = false;
 
+// Global MQTT client handle
+static esp_mqtt_client_handle_t mqtt_client;
+
 
 // Improved soil moisture reading with validation
 int read_soil_sensor() {
@@ -184,6 +196,13 @@ bool send_to_http_queue(http_request_t* req, int priority, TickType_t wait_ticks
 
     // For regular priority requests
     return xQueueSend(http_request_queue, req, wait_ticks) == pdTRUE;
+}
+
+// Simple wrapper to publish MQTT sensor data
+static void mqtt_publish_sensor(esp_mqtt_client_handle_t client, const char *topic, const char *payload) {
+    if (client && topic && payload) {
+        esp_mqtt_client_publish(client, topic, payload, 0, 1, 0);
+    }
 }
 
 // Improved HTTP request task with better error handling and throughput
@@ -959,16 +978,16 @@ static void second_loop_task(void *arg)
 
 	char mqtt_payload[64];
 	// MQTT
-	const esp_mqtt_client_config_t mqtt_cfg = {
-    	.broker.address.uri = "mqtts://6bdeb9e091414b898b8a01d7ab63bcd2.s1.eu.hivemq.cloud:8883",
-    	//.broker.verification.certificate = NULL,
-		.broker.verification.certificate = (const char *)ca_cert_pem_start,
-    	.credentials.username = "eee4464",
-    	.credentials.authentication.password = "Eee4464iot",
-    	//.broker.verification.use_global_ca_store = false,
-	};
-	esp_mqtt_client_handle_t mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
-	esp_mqtt_client_start(mqtt_client);
+        const esp_mqtt_client_config_t mqtt_cfg = {
+        .broker.address.uri = "mqtts://6bdeb9e091414b898b8a01d7ab63bcd2.s1.eu.hivemq.cloud:8883",
+        //.broker.verification.certificate = NULL,
+                .broker.verification.certificate = (const char *)ca_cert_pem_start,
+        .credentials.username = "eee4464",
+        .credentials.authentication.password = "Eee4464iot",
+        //.broker.verification.use_global_ca_store = false,
+        };
+        mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
+        esp_mqtt_client_start(mqtt_client);
 
 
 	int current_count = 0;
@@ -1004,11 +1023,18 @@ static void second_loop_task(void *arg)
 			light_value = adc1_get_raw(PHOTORESISTOR_ADC); // 0-4095
 			photoresistor_voltage = (light_value / 4095.0) * 3.3; // convert to voltage
 			ESP_LOGI("Photoresistor", "💡Light value: %d, Voltage: %.2f V", light_value, photoresistor_voltage);
-			snprintf(reqs[0].json_body, sizeof(reqs[0].json_body),
+                        snprintf(reqs[0].json_body, sizeof(reqs[0].json_body),
                      "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"light_value\":%d,\"voltage\":%.2f}}",
                      sensors[6].id, device_id, light_value, photoresistor_voltage);
-			send_to_http_queue(&reqs[0], 0, 0);  // Non-critical sensor data, don't wait
+#ifdef CONFIG_USE_MQTT
+                        snprintf(mqtt_payload, sizeof(mqtt_payload),
+                                 "{\"light_value\":%d,\"voltage\":%.2f}",
+                                 light_value, photoresistor_voltage);
+                        mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_LIGHT, mqtt_payload);
+#else
+                        send_to_http_queue(&reqs[0], 0, 0);  // Non-critical sensor data, don't wait
             //xQueueSend(http_request_queue, &reqs[0], 0);
+#endif
 
 
 
@@ -1029,12 +1055,17 @@ static void second_loop_task(void *arg)
                 ESP_LOGI("RCWL", "🌫️ No motion.");
                 motion_count = 0; // reset count if no motion detected
             }
-			snprintf(reqs[1].json_body, sizeof(reqs[1].json_body),
+                        snprintf(reqs[1].json_body, sizeof(reqs[1].json_body),
                      "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"motion_detected\":%d}}",
                      sensors[5].id, device_id, motion_count >= 4 ? 1 : 0);
-
-			send_to_http_queue(&reqs[1], 0, 0);
+#ifdef CONFIG_USE_MQTT
+                        snprintf(mqtt_payload, sizeof(mqtt_payload),
+                                 "{\"motion_detected\":%d}", motion_count >= 4 ? 1 : 0);
+                        mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_MOTION, mqtt_payload);
+#else
+                        send_to_http_queue(&reqs[1], 0, 0);
             //xQueueSend(http_request_queue, &reqs[1], 0);
+#endif
 
 
 
@@ -1047,9 +1078,11 @@ static void second_loop_task(void *arg)
 			float voltage = (raw / 64.0) / 4095.0 * 5;
 			current = (voltage - zero_offset) / 0.185;
 			current = fabs(current);
-			// through MQTT post current data
-			snprintf(mqtt_payload, sizeof(mqtt_payload), "{\"current\":%.2f}", fabs(current));
-			esp_mqtt_client_publish(mqtt_client, "iot/current", mqtt_payload, 0, 1, 0);
+                        // through MQTT post current data
+#ifdef CONFIG_USE_MQTT
+                        snprintf(mqtt_payload, sizeof(mqtt_payload), "{\"current\":%.2f}", fabs(current));
+                        mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_CURRENT, mqtt_payload);
+#endif
             snprintf(reqs[2].json_body, sizeof(reqs[2].json_body),
                      "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"current\":%.2f}}",
                      sensors[4].id, device_id, current);
@@ -1073,15 +1106,22 @@ static void second_loop_task(void *arg)
                 	// Post temperature and humidity data to cloud
                 // is one sensor but send two data to different sensors
                 snprintf(reqs[3].json_body, sizeof(reqs[3].json_body),
-                       "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"temperature\":%.1f}}",
-                       sensors[0].id, device_id, temperature);
+                        "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"temperature\":%.1f}}",
+                        sensors[0].id, device_id, temperature);
                 snprintf(reqs[4].json_body, sizeof(reqs[4].json_body),
-                       "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"humidity\":%.1f}}",
-                       sensors[1].id, device_id, humidity);
+                        "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"humidity\":%.1f}}",
+                        sensors[1].id, device_id, humidity);
+#ifdef CONFIG_USE_MQTT
+                snprintf(mqtt_payload, sizeof(mqtt_payload), "{\"temperature\":%.1f}", temperature);
+                mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_TEMPERATURE, mqtt_payload);
+                snprintf(mqtt_payload, sizeof(mqtt_payload), "{\"humidity\":%.1f}", humidity);
+                mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_HUMIDITY, mqtt_payload);
+#else
                 //send_to_http_queue(&reqs[3], 0, 0);
                 //send_to_http_queue(&reqs[4], 0, 0);
                 xQueueSend(http_request_queue, &reqs[3], 0);
                 xQueueSend(http_request_queue, &reqs[4], 0);
+#endif
 
         	}
         }
@@ -1105,7 +1145,12 @@ static void second_loop_task(void *arg)
                 snprintf(req1.json_body, sizeof(req1.json_body),
                         "{\"sensor_id\":%d,\"device_id\":%d,\"data\":%s}",
                         sensors[2].id, device_id, soil_data);
+#ifdef CONFIG_USE_MQTT
+                snprintf(mqtt_payload, sizeof(mqtt_payload), "{\"moisture\":%d}", moisture);
+                mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_MOISTURE, mqtt_payload);
+#else
                 send_to_http_queue(&req1, 0, pdMS_TO_TICKS(50));
+#endif
 
                 char control_url[50];
                 snprintf(control_url, sizeof(control_url),
@@ -1156,7 +1201,12 @@ static void second_loop_task(void *arg)
                 snprintf(req4.json_body, sizeof(req4.json_body),
                         "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"pump_state\":%d}}",
                         sensors[3].id, device_id, pump_on ? 1 : 0);
+#ifdef CONFIG_USE_MQTT
+                snprintf(mqtt_payload, sizeof(mqtt_payload), "{\"pump_state\":%d}", pump_on ? 1 : 0);
+                mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_PUMP, mqtt_payload);
+#else
                 send_to_http_queue(&req4, 0, pdMS_TO_TICKS(50));
+#endif
             } else {
                 ESP_LOGW("Soil Moisture Sensor", "Invalid moisture value: %d - skipping this reading", moisture);
             }
