@@ -38,6 +38,7 @@
 
 #include "freertos/queue.h"
 #include "mqtt_client.h"
+#include "mqtt_utils.h"
 #include "esp_task_wdt.h"
 #include "driver/uart.h"
 // --------------------------- Button Interrupt/Task Implementation -----------------------------
@@ -1049,7 +1050,7 @@ static void second_loop_task(void *arg)
 			current = fabs(current);
 			// through MQTT post current data
 			snprintf(mqtt_payload, sizeof(mqtt_payload), "{\"current\":%.2f}", fabs(current));
-			esp_mqtt_client_publish(mqtt_client, "iot/current", mqtt_payload, 0, 1, 0);
+                        mqtt_publish_sensor(mqtt_client, "iot/current", mqtt_payload);
             snprintf(reqs[2].json_body, sizeof(reqs[2].json_body),
                      "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"current\":%.2f}}",
                      sensors[4].id, device_id, current);

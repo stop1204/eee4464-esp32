@@ -1,5 +1,5 @@
 idf_component_register(
-        SRCS "main.c"
+        SRCS "main.c" "mqtt_utils.c"
             "../cloudflare_api/cloudflare_api.c"
         INCLUDE_DIRS "."
              "../cloudflare_api"
