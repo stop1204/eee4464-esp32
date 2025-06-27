@@ -810,6 +810,7 @@ void end(void)
 
 
 void button_task(void* arg) {
+    ESP_LOGI("Test Button", "Entered task loop");
     ESP_LOGI("button_task", "Stack high-water mark at start: %u words",
              uxTaskGetStackHighWaterMark(NULL));
     // Use the HTTP request queue instead of direct API calls
@@ -819,54 +820,78 @@ void button_task(void* arg) {
     snprintf(control_url, sizeof(control_url), "/api/controls?control_id=%d", sensors[3].id);
     snprintf(req1.endpoint, sizeof(req1.endpoint), "%s", control_url);
     snprintf(req2.endpoint, sizeof(req2.endpoint), "/api/messages");
-
     while (1) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        vTaskDelay(pdMS_TO_TICKS(50)); // Debounce delay
+        // Use interrupt notification if available
+        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100)) == 1) {
+            vTaskDelay(pdMS_TO_TICKS(50)); // Debounce delay
+            // Check button state again after debounce to confirm it's still pressed
+            if (gpio_get_level(TEST_BUTTON_GPIO) == 0) {
+                relay_state = !relay_state;
+                pump_on = relay_state;
+                set_soil_relay(relay_state);
 
-        // Check button state again after debounce to confirm it's still pressed
-        if (gpio_get_level(TEST_BUTTON_GPIO) == 0) {
-            relay_state = !relay_state;
-            pump_on = relay_state;
-            set_soil_relay(relay_state);
+                ESP_LOGW("Test Button", "Relay toggled to %s", relay_state ? "ON" : "OFF");
 
-            ESP_LOGW("Test Button", "Relay toggled to %s", relay_state ? "ON" : "OFF");
+                // Try up to 3 times to send control request
+                bool control_queued = false;
+                bool message_queued = false;
 
-            // Try up to 3 times to send control request
-            bool control_queued = false;
-            bool message_queued = false;
+                if (pump_on) {
+                    snprintf(req1.json_body, sizeof(req1.json_body), "{\"state\":\"on\"}");
+                    snprintf(req2.json_body, sizeof(req2.json_body),
+                            "{\"device_id\":%d,\"control_id\":%d,\"state\":\"on\",\"from_source\":\"%s\"}",
+                            device_id, sensors[3].id, sensors[3].name);
+                } else {
+                    snprintf(req1.json_body, sizeof(req1.json_body), "{\"state\":\"off\"}");
+                    snprintf(req2.json_body, sizeof(req2.json_body),
+                            "{\"device_id\":%d,\"control_id\":%d,\"state\":\"off\",\"from_source\":\"%s\"}",
+                            device_id, sensors[3].id, sensors[3].name);
+                }
 
-            if (pump_on) {
-                snprintf(req1.json_body, sizeof(req1.json_body), "{\"state\":\"on\"}");
-                snprintf(req2.json_body, sizeof(req2.json_body),
-                        "{\"device_id\":%d,\"control_id\":%d,\"state\":\"on\",\"from_source\":\"%s\"}",
-                        device_id, sensors[3].id, sensors[3].name);
-            } else {
-                snprintf(req1.json_body, sizeof(req1.json_body), "{\"state\":\"off\"}");
-                snprintf(req2.json_body, sizeof(req2.json_body),
-                        "{\"device_id\":%d,\"control_id\":%d,\"state\":\"off\",\"from_source\":\"%s\"}",
-                        device_id, sensors[3].id, sensors[3].name);
+                // Try sending control request with high priority
+                for (int retry = 0; retry < 1 && !control_queued; retry++) {
+                    if (retry > 0) {
+                        ESP_LOGW("Button HTTP", "Retrying control request (attempt %d/3)", retry+1);
+                        vTaskDelay(pdMS_TO_TICKS(100 * retry));
+                    }
+                    control_queued = send_to_http_queue(&req1, 10, pdMS_TO_TICKS(200));
+                }
+
+                if (!control_queued) {
+                    ESP_LOGE("Button HTTP", "Failed to queue control request after multiple attempts");
+                    // As a fallback, try direct API call for critical state change
+                    cloudflare_put_json(req1.endpoint, req1.json_body);
+                }
+
+                // Message is less critical, just try once with priority 5
+                message_queued = send_to_http_queue(&req2, 5, pdMS_TO_TICKS(100));
+                if (!message_queued) {
+                    ESP_LOGW("Button HTTP", "Failed to queue message request");
+                }
             }
-
-            // Try sending control request with high priority
-            for (int retry = 0; retry < 1 && !control_queued; retry++) {
-                if (retry > 0) {
-                    ESP_LOGW("Button HTTP", "Retrying control request (attempt %d/3)", retry+1);
-                    vTaskDelay(pdMS_TO_TICKS(100 * retry));
+        } else {
+            // Fallback: polling method if interrupt/notify fails (button held, or missed ISR)
+            if (gpio_get_level(TEST_BUTTON_GPIO) == 0) {
+                relay_state = !relay_state;
+                pump_on = relay_state;
+                set_soil_relay(relay_state);
+                ESP_LOGW("Test Button", "Relay toggled to %s (by polling fallback)", relay_state ? "ON" : "OFF");
+                bool control_queued = false;
+                bool message_queued = false;
+                if (pump_on) {
+                    snprintf(req1.json_body, sizeof(req1.json_body), "{\"state\":\"on\"}");
+                    snprintf(req2.json_body, sizeof(req2.json_body),
+                            "{\"device_id\":%d,\"control_id\":%d,\"state\":\"on\",\"from_source\":\"%s\"}",
+                            device_id, sensors[3].id, sensors[3].name);
+                } else {
+                    snprintf(req1.json_body, sizeof(req1.json_body), "{\"state\":\"off\"}");
+                    snprintf(req2.json_body, sizeof(req2.json_body),
+                            "{\"device_id\":%d,\"control_id\":%d,\"state\":\"off\",\"from_source\":\"%s\"}",
+                            device_id, sensors[3].id, sensors[3].name);
                 }
                 control_queued = send_to_http_queue(&req1, 10, pdMS_TO_TICKS(200));
-            }
-
-            if (!control_queued) {
-                ESP_LOGE("Button HTTP", "Failed to queue control request after multiple attempts");
-                // As a fallback, try direct API call for critical state change
-                cloudflare_put_json(req1.endpoint, req1.json_body);
-            }
-
-            // Message is less critical, just try once with priority 5
-            message_queued = send_to_http_queue(&req2, 5, pdMS_TO_TICKS(100));
-            if (!message_queued) {
-                ESP_LOGW("Button HTTP", "Failed to queue message request");
+                message_queued = send_to_http_queue(&req2, 5, pdMS_TO_TICKS(100));
+                vTaskDelay(pdMS_TO_TICKS(500)); // avoid rapid toggling
             }
         }
     }
@@ -1078,9 +1103,9 @@ static void second_loop_task(void *arg)
                      "{\"light_value\":%d,\"voltage\":%.2f}",
                      light_value, photoresistor_voltage);
             mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_LIGHT, mqtt_payload);
-#else
-            send_to_http_queue(&reqs[0], 0, 0);  // Non-critical sensor data, don't wait
 #endif
+            // Remove or comment out HTTP queue for light sensor
+            // send_to_http_queue(&reqs[0], 0, 0);
 
             // Read RCWL-0516 sensor
             // filter out false positives, if 4 out of 5 readings are high, consider it a motion
@@ -1105,9 +1130,9 @@ static void second_loop_task(void *arg)
             snprintf(mqtt_payload, sizeof(mqtt_payload),
                      "{\"motion_detected\":%d}", motion_count >= 4 ? 1 : 0);
             mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_MOTION, mqtt_payload);
-#else
-            send_to_http_queue(&reqs[1], 0, 0);
 #endif
+            // Remove or comment out HTTP queue for motion sensor
+            // send_to_http_queue(&reqs[1], 0, 0);
 
             // Read ACS712 current sensor (average 64 samples)
             int raw = 0, tmp;
@@ -1125,7 +1150,8 @@ static void second_loop_task(void *arg)
             snprintf(reqs[2].json_body, sizeof(reqs[2].json_body),
                      "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"current\":%.2f}}",
                      sensors[4].id, device_id, current);
-            xQueueSend(http_request_queue, &reqs[2], 0);
+            // Remove or comment out HTTP queue for current sensor
+            // xQueueSend(http_request_queue, &reqs[2], 0);
 
             ESP_LOGI("ACS712", "Current: %.2f A", current);
 
@@ -1148,10 +1174,10 @@ static void second_loop_task(void *arg)
                 mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_TEMPERATURE, mqtt_payload);
                 snprintf(mqtt_payload, sizeof(mqtt_payload), "{\"humidity\":%.1f}", humidity);
                 mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_HUMIDITY, mqtt_payload);
-#else
-                xQueueSend(http_request_queue, &reqs[3], 0);
-                xQueueSend(http_request_queue, &reqs[4], 0);
 #endif
+                // Remove or comment out HTTP queue for temp/humidity sensor
+                // xQueueSend(http_request_queue, &reqs[3], 0);
+                // xQueueSend(http_request_queue, &reqs[4], 0);
             }
         }
 
@@ -1167,11 +1193,14 @@ static void second_loop_task(void *arg)
                 char soil_data[64];
                 snprintf(soil_data, sizeof(soil_data), "{\"moisture\":%d}", moisture);
 
-                http_request_t req1;
-                snprintf(req1.endpoint, sizeof(req1.endpoint), "/api/sensor_data");
-                snprintf(req1.json_body, sizeof(req1.json_body),
-                        "{\"sensor_id\":%d,\"device_id\":%d,\"data\":%s}",
-                        sensors[2].id, device_id, soil_data);
+                // Remove or comment out HTTP queue for soil moisture sensor
+                // http_request_t req1;
+                // snprintf(req1.endpoint, sizeof(req1.endpoint), "/api/sensor_data");
+                // snprintf(req1.json_body, sizeof(req1.json_body),
+                //         "{\"sensor_id\":%d,\"device_id\":%d,\"data\":%s}",
+                //         sensors[2].id, device_id, soil_data);
+                // send_to_http_queue(&req1, 0, pdMS_TO_TICKS(50));
+
                 // MQTT publish for soil moisture
                 snprintf(mqtt_payload, sizeof(mqtt_payload), "{\"moisture\":%d}", moisture);
                 mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_MOISTURE, mqtt_payload);
@@ -1220,16 +1249,23 @@ static void second_loop_task(void *arg)
                 }
 
                 // record pump state change
-                http_request_t req4;
-                snprintf(req4.endpoint, sizeof(req4.endpoint), "/api/sensor_data");
-                snprintf(req4.json_body, sizeof(req4.json_body),
-                        "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"pump_state\":%d}}",
-                        sensors[3].id, device_id, pump_on ? 1 : 0);
+                // Remove or comment out HTTP queue for pump state sensor
+                // http_request_t req4;
+                // snprintf(req4.endpoint, sizeof(req4.endpoint), "/api/sensor_data");
+                // snprintf(req4.json_body, sizeof(req4.json_body),
+                //         "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"pump_state\":%d}}",
+                //         sensors[3].id, device_id, pump_on ? 1 : 0);
+                // send_to_http_queue(&req4, 0, pdMS_TO_TICKS(50));
                 // MQTT publish for pump state
                 snprintf(mqtt_payload, sizeof(mqtt_payload), "{\"pump_state\":%d}", pump_on ? 1 : 0);
                 mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_PUMP, mqtt_payload);
             } else {
-                ESP_LOGW("Soil Moisture Sensor", "Invalid moisture value: %d - skipping this reading", moisture);
+                set_soil_relay(false);
+                pump_on = false;
+                relay_state = false;
+                ESP_LOGW("Soil Moisture Sensor", "Invalid moisture value: %d - pump forced OFF", moisture);
+                snprintf(mqtt_payload, sizeof(mqtt_payload), "{\"pump_state\":0}");
+                mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_PUMP, mqtt_payload);
             }
 
             soil_read_counter = 0; // Reset counter after reading
@@ -1255,12 +1291,13 @@ static void process_arduino_data(const char *data) {
     if (cJSON_IsNumber(hr) ) {
         int heart = hr->valueint;
         if (heart >= 40 && heart <= 180 ) {
-            http_request_t req1;
-            snprintf(req1.endpoint, sizeof(req1.endpoint), "/api/sensor_data");
-            snprintf(req1.json_body, sizeof(req1.json_body),
-                     "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"heart_rate\":%d}}",
-                     sensors[7].id, device_id, heart);
-            send_to_http_queue(&req1, 0, pdMS_TO_TICKS(50));
+            // Remove or comment out HTTP queue for heart rate sensor
+            // http_request_t req1;
+            // snprintf(req1.endpoint, sizeof(req1.endpoint), "/api/sensor_data");
+            // snprintf(req1.json_body, sizeof(req1.json_body),
+            //         "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"heart_rate\":%d}}",
+            //         sensors[7].id, device_id, heart);
+            // send_to_http_queue(&req1, 0, pdMS_TO_TICKS(50));
             // MQTT publish for heart rate
             snprintf(mqtt_payload, sizeof(mqtt_payload), "{\"heart_rate\":%d}", heart);
             mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_HEART_RATE, mqtt_payload);
