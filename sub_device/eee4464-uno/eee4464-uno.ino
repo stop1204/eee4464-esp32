@@ -31,7 +31,7 @@ bool auxMode = false;
 int brightnessLevel = 1; // 0=Low, 1=Mid, 2=High
 int colorTempStep = 2;   // 0~4
 
-const int brightnessPWM[3] = {254, 128, 30};
+const int brightnessPWM[3] = {180, 128, 30};
 
 
 MAX30105 sensor;
@@ -153,7 +153,7 @@ void handleIRandLighting() {
           fogOn = true;
           clearOn = true;
           auxMode = true;
-          brightnessLevel = 2; // force max
+          brightnessLevel = 1; // force max
           break;
 
         case 0xFF: // Brightness Step
