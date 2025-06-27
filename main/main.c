@@ -27,7 +27,12 @@
 #include "esp_http_server.h"
 #include "cJSON.h"
 #include "driver/gpio.h"
-#include "driver/adc.h"
+#include "esp_adc/adc_oneshot.h"
+#include "esp_adc/adc_continuous.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
+
+#include "esp_sntp.h"
 #include "esp_sntp.h"
 #include <math.h>
 // API
@@ -44,23 +49,31 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 
-
+#define CONFIG_USE_MQTT // use mqtt instead of HTTP for sensor data
 // define GPIO
 #define LED_STATUS_GPIO GPIO_NUM_5
-#define SOIL_SENSOR_ADC ADC1_CHANNEL_0 // GPIO36
-#define SOIL_SENSOR_ADC_WIDTH ADC_WIDTH_BIT_12
-#define SOIL_SENSOR_ADC_ATTEN ADC_ATTEN_DB_11 // 11dB attenuation for 3.3V range
+
 #define SOIL_RELAY_GPIO GPIO_NUM_25
 #define TEST_BUTTON_GPIO GPIO_NUM_4 // GPIO4 for test button
 #define MAX_CONTROLS_BUFFER 1024  // 從 256 增加到 1024
-#define ACS712_ADC_CHANNEL ADC1_CHANNEL_6  // GPIO34
-#define ACS712_ADC_WIDTH   ADC_WIDTH_BIT_12
-#define ACS712_ADC_ATTEN   ADC_ATTEN_DB_11
+
 #define RCWL_GPIO GPIO_NUM_32 // RCWL-0516 sensor GPIO
 #define DHT_GPIO GPIO_NUM_0
-#define PHOTORESISTOR_ADC ADC1_CHANNEL_7 // for microwave radar sensor  GPIO15 ADC13
+
 #define PHOTORESISTOR_ADC_WIDTH ADC_WIDTH_BIT_12
-#define PHOTORESISTOR_ADC_ATTEN ADC_ATTEN_DB_11 // 11dB attenuation for 3.3V range
+
+// ___________________________________________________ new version API
+#define ACS712_ADC_CHANNEL      ADC_CHANNEL_6   // GPIO34
+#define ACS712_ADC_WIDTH        ADC_BITWIDTH_12
+#define ACS712_ADC_ATTEN        ADC_ATTEN_DB_12
+
+#define PHOTORESISTOR_ADC       ADC_CHANNEL_7   // GPIO15
+#define PHOTORESISTOR_ADC_ATTEN ADC_ATTEN_DB_12
+
+#define SOIL_SENSOR_ADC         ADC_CHANNEL_0   // GPIO36
+#define SOIL_SENSOR_ADC_WIDTH   ADC_BITWIDTH_12
+#define SOIL_SENSOR_ADC_ATTEN   ADC_ATTEN_DB_12
+// ___________________________________________________
 #define BUTTON_TASK_STACK 8192   // TLS + HTTP needs larger stack
 #define WIFI_RESET_GPIO GPIO_NUM_16
 #define EX_UART_NUM UART_NUM_2
@@ -142,17 +155,22 @@ static bool is_softap_mode = false;
 // Global MQTT client handle
 static esp_mqtt_client_handle_t mqtt_client;
 
+static adc_oneshot_unit_handle_t adc1_handle;
 
-// Improved soil moisture reading with validation
+// Improved soil moisture reading with validation using One-shot ADC API
 int read_soil_sensor() {
-    // Take multiple readings for stability
+    adc_oneshot_chan_cfg_t chan_config = {
+        .bitwidth = SOIL_SENSOR_ADC_WIDTH,
+        .atten = SOIL_SENSOR_ADC_ATTEN
+    };
+    adc_oneshot_config_channel(adc1_handle, SOIL_SENSOR_ADC, &chan_config);
+
     int readings[5] = {0};
     for (int i = 0; i < 5; i++) {
-        readings[i] = adc1_get_raw(ADC1_CHANNEL_0);
-        vTaskDelay(pdMS_TO_TICKS(5)); // Small delay between readings
+        adc_oneshot_read(adc1_handle, SOIL_SENSOR_ADC, &readings[i]);
+        vTaskDelay(pdMS_TO_TICKS(5));
     }
 
-    // Sort readings to find median (more robust than average)
     for (int i = 0; i < 4; i++) {
         for (int j = i + 1; j < 5; j++) {
             if (readings[i] > readings[j]) {
@@ -163,7 +181,6 @@ int read_soil_sensor() {
         }
     }
 
-    // Return median reading
     return readings[2];
 }
 
@@ -669,9 +686,9 @@ static void setup_rcwl0516_sensor(void) {
     gpio_config(&io_conf);
 }
 void init_time() {
-    sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    sntp_setservername(0, "pool.ntp.org");
-    sntp_init();
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_init();
 }
 
 void init(void)
@@ -714,10 +731,7 @@ void init(void)
     // ###################################################################################
 
     init_time();
-
-    // soil  moisture sensor config.
-    adc1_config_width(SOIL_SENSOR_ADC_WIDTH);
-    adc1_config_channel_atten(SOIL_SENSOR_ADC, SOIL_SENSOR_ADC_ATTEN); // GPIO36
+    // soil  moisture sensor config (now uses oneshot ADC, config done in read_soil_sensor)
     gpio_reset_pin(SOIL_RELAY_GPIO);
     gpio_set_direction(SOIL_RELAY_GPIO, GPIO_MODE_OUTPUT);
     gpio_set_drive_capability(SOIL_RELAY_GPIO, GPIO_DRIVE_CAP_3);  // Max drive strength
@@ -736,19 +750,15 @@ void init(void)
     gpio_config(&test_button_conf);
     // Already configured via gpio_config_t, do not override
 
-	// ACS712 current sensor config.
-    adc1_config_width(ACS712_ADC_WIDTH);
-    adc1_config_channel_atten(ACS712_ADC_CHANNEL, ACS712_ADC_ATTEN); // GPIO34
-
-	// photoresistor sensor config.
-	adc1_config_width(PHOTORESISTOR_ADC_WIDTH);
-	adc1_config_channel_atten(PHOTORESISTOR_ADC, PHOTORESISTOR_ADC_ATTEN); // ADC1_CHANNEL_13
-
-
-
     // microwave radar sensor config.
     setup_rcwl0516_sensor();
     setup_uart2();
+
+    // Initialize global adc1_handle for soil sensor (and possible reuse)
+    adc_oneshot_unit_init_cfg_t init_config = {
+        .unit_id = ADC_UNIT_1
+    };
+    adc_oneshot_new_unit(&init_config, &adc1_handle);
 }
 void end(void)
 {
@@ -789,7 +799,7 @@ void button_task(void* arg) {
             // Try up to 3 times to send control request
             bool control_queued = false;
             bool message_queued = false;
-            
+
             if (pump_on) {
                 snprintf(req1.json_body, sizeof(req1.json_body), "{\"state\":\"on\"}");
                 snprintf(req2.json_body, sizeof(req2.json_body),
@@ -798,10 +808,10 @@ void button_task(void* arg) {
             } else {
                 snprintf(req1.json_body, sizeof(req1.json_body), "{\"state\":\"off\"}");
                 snprintf(req2.json_body, sizeof(req2.json_body),
-                        "{\"device_id\":%d,\"control_id\":%d,\"state\":\"off\",\"from_source\":\"%s\"}", 
+                        "{\"device_id\":%d,\"control_id\":%d,\"state\":\"off\",\"from_source\":\"%s\"}",
                         device_id, sensors[3].id, sensors[3].name);
             }
-            
+
             // Try sending control request with high priority
             for (int retry = 0; retry < 1 && !control_queued; retry++) {
                 if (retry > 0) {
@@ -810,13 +820,13 @@ void button_task(void* arg) {
                 }
                 control_queued = send_to_http_queue(&req1, 10, pdMS_TO_TICKS(200));
             }
-            
+
             if (!control_queued) {
                 ESP_LOGE("Button HTTP", "Failed to queue control request after multiple attempts");
                 // As a fallback, try direct API call for critical state change
                 cloudflare_put_json(req1.endpoint, req1.json_body);
             }
-            
+
             // Message is less critical, just try once with priority 5
             message_queued = send_to_http_queue(&req2, 5, pdMS_TO_TICKS(100));
             if (!message_queued) {
@@ -830,7 +840,7 @@ void button_task(void* arg) {
 static void IRAM_ATTR test_button_isr_handler(void* arg) {
     static uint32_t last_button_time = 0;
     uint32_t current_time = xTaskGetTickCountFromISR();
-    
+
     // Simple debounce - ignore interrupts that come too quickly after each other
     if ((current_time - last_button_time) >= pdMS_TO_TICKS(300)) {
         last_button_time = current_time;
@@ -858,50 +868,50 @@ static void setup_test_button_interrupt(void) {
 // 完全重寫的 cloud controls 處理函数
 void handle_cloud_controls(void) {
     ESP_LOGW("ControlSync", "Checking cloud controls...");
-    
+
     // Clear buffer before use
     memset(controls_buf, 0, sizeof(controls_buf));
-    
+
     esp_err_t fetch_result = cloudflare_get_json(url_control, controls_buf, sizeof(controls_buf));
     if (fetch_result != ESP_OK) {
         ESP_LOGW("ControlSync", "Failed to fetch controls: %s", esp_err_to_name(fetch_result));
         return;
     }
-    
+
     if (strlen(controls_buf) == 0) {
         ESP_LOGW("ControlSync", "Received empty response");
         return;
     }
-    
+
     // 僅針對 Pump 控制（sensors[3].id）進行處理
     // 這種方法不嘗試解析整個 JSON，只找出我們需要的 Pump 控制
     char pump_control_id[16];
     snprintf(pump_control_id, sizeof(pump_control_id), "\"%d\"", sensors[3].id);
-    
+
     // 在原始 JSON 回應中搜索 pump 控制項
     char *pump_control = strstr(controls_buf, pump_control_id);
     if (pump_control == NULL) {
         ESP_LOGI("ControlSync", "No pump control found in response");
         return;
     }
-    
+
     // 在該控制項中尋找 "control_type":"switch" 以確認這是開關類型
     char *control_type = strstr(pump_control, "\"control_type\":\"switch\"");
     if (control_type == NULL) {
         ESP_LOGI("ControlSync", "Pump control is not of switch type");
         return;
     }
-    
+
     // 在該控制項中尋找狀態
     char *state = strstr(pump_control, "\"state\":\"");
     if (state == NULL) {
         ESP_LOGI("ControlSync", "No state found for pump control");
         return;
     }
-    
+
     // 移動指針到狀態值
     state += 9; // 跳過 "state":"
-    
+
     // 檢查狀態是否為 "on"
     if (strncmp(state, "on\"", 3) == 0) {
         if (!pump_on) {
@@ -910,7 +920,7 @@ void handle_cloud_controls(void) {
             relay_state = true;
             ESP_LOGI("ControlSync", "Pump turned ON from cloud control");
         }
-    } 
+    }
     // 檢查狀態是否為 "off"
     else if (strncmp(state, "off\"", 4) == 0) {
         if (pump_on) {
@@ -949,7 +959,7 @@ static void main_loop_task(void *arg)
     http_request_t req2, req3;
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(500)); // Delay for 0.5 seconds
-        
+
         if(soil_read_counter % 2 == 0) {
             // Check cloud controls every 3 ticks (1.5 seconds)
             handle_cloud_controls();
@@ -959,46 +969,60 @@ static void main_loop_task(void *arg)
     }
 }
 
-	void calibrate_zero_offset() {
-    	int raw = 0;
-    	for (int i = 0; i < 256; ++i)
-        	raw += adc1_get_raw(ACS712_ADC_CHANNEL);
+	void calibrate_zero_offset(adc_oneshot_unit_handle_t adc1_handle) {
+    	int raw = 0, tmp;
+    	for (int i = 0; i < 256; ++i) {
+        	adc_oneshot_read(adc1_handle, ACS712_ADC_CHANNEL, &tmp);
+        	raw += tmp;
+    	}
     	zero_offset = (raw / 256.0) / 4095.0 * 5;
 		ESP_LOGI("ACS712", "Zero offset calibrated: %.2f V", zero_offset);
 	}
 static void second_loop_task(void *arg)
 {
     static bool led_on = false;
-	float temperature = 0;
+    float temperature = 0;
     float humidity = 0;
     // initialize test button task
     xTaskCreate(button_task, "button_task", BUTTON_TASK_STACK, NULL, 10, &button_task_handle);
     setup_test_button_interrupt();
-	calibrate_zero_offset();
+    // Use global adc1_handle for soil sensor, create a local handle for other ADC channels if needed
+    // Config for photoresistor
+    adc_oneshot_chan_cfg_t photo_cfg = {
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+        .atten = PHOTORESISTOR_ADC_ATTEN
+    };
+    adc_oneshot_config_channel(adc1_handle, PHOTORESISTOR_ADC, &photo_cfg);
+    // Config for ACS712
+    adc_oneshot_chan_cfg_t acs_cfg = {
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+        .atten = ACS712_ADC_ATTEN
+    };
+    adc_oneshot_config_channel(adc1_handle, ACS712_ADC_CHANNEL, &acs_cfg);
 
-	char mqtt_payload[64];
-	// MQTT
-        const esp_mqtt_client_config_t mqtt_cfg = {
+    calibrate_zero_offset(adc1_handle);
+
+    char mqtt_payload[64];
+    // MQTT
+    const esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = "mqtts://6bdeb9e091414b898b8a01d7ab63bcd2.s1.eu.hivemq.cloud:8883",
         //.broker.verification.certificate = NULL,
-                .broker.verification.certificate = (const char *)ca_cert_pem_start,
+        .broker.verification.certificate = (const char *)ca_cert_pem_start,
         .credentials.username = "eee4464",
         .credentials.authentication.password = "Eee4464iot",
         //.broker.verification.use_global_ca_store = false,
-        };
-        mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
-        esp_mqtt_client_start(mqtt_client);
+    };
+    mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
+    esp_mqtt_client_start(mqtt_client);
 
-
-	int current_count = 0;
-	float current = 0.0f;
-	int light_value = 0;
-	float photoresistor_voltage = 0.0f;
-	http_request_t reqs[5];
-	for (int i = 0; i < 5; ++i) {
-	    snprintf(reqs[i].endpoint, sizeof(reqs[i].endpoint), "/api/sensor_data");
-	}
-
+    int current_count = 0;
+    float current = 0.0f;
+    int light_value = 0;
+    float photoresistor_voltage = 0.0f;
+    http_request_t reqs[5];
+    for (int i = 0; i < 5; ++i) {
+        snprintf(reqs[i].endpoint, sizeof(reqs[i].endpoint), "/api/sensor_data");
+    }
 
     int motion_count = 0;
     int soil_read_counter=0;
@@ -1013,34 +1037,30 @@ static void second_loop_task(void *arg)
 
         if (is_softap_mode) continue;  // Skip network operations in softAP mode
 
-		// caculate Vref and voltage (V), ESP32 ADC theoretical max is 4095 (12bit)
-		// 0 current,  voltage output Vcc/2 ~=> 2.5V  (input 5V)
-		// offset = 2.5V, sensitivity = 0.185V/A (for 5A module)
-		if (++current_count >= 4) { // every 2 seconds
+        // caculate Vref and voltage (V), ESP32 ADC theoretical max is 4095 (12bit)
+        // 0 current,  voltage output Vcc/2 ~=> 2.5V  (input 5V)
+        // offset = 2.5V, sensitivity = 0.185V/A (for 5A module)
+        if (++current_count >= 4) { // every 2 seconds
             current_count = 0;
 
-			// Read photoresistor sensor
-			light_value = adc1_get_raw(PHOTORESISTOR_ADC); // 0-4095
-			photoresistor_voltage = (light_value / 4095.0) * 3.3; // convert to voltage
-			ESP_LOGI("Photoresistor", "💡Light value: %d, Voltage: %.2f V", light_value, photoresistor_voltage);
-                        snprintf(reqs[0].json_body, sizeof(reqs[0].json_body),
+            // Read photoresistor sensor
+            adc_oneshot_read(adc1_handle, PHOTORESISTOR_ADC, &light_value);
+            photoresistor_voltage = (light_value / 4095.0) * 3.3; // convert to voltage
+            ESP_LOGI("Photoresistor", "💡Light value: %d, Voltage: %.2f V", light_value, photoresistor_voltage);
+            snprintf(reqs[0].json_body, sizeof(reqs[0].json_body),
                      "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"light_value\":%d,\"voltage\":%.2f}}",
                      sensors[6].id, device_id, light_value, photoresistor_voltage);
 #ifdef CONFIG_USE_MQTT
-                        snprintf(mqtt_payload, sizeof(mqtt_payload),
-                                 "{\"light_value\":%d,\"voltage\":%.2f}",
-                                 light_value, photoresistor_voltage);
-                        mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_LIGHT, mqtt_payload);
+            snprintf(mqtt_payload, sizeof(mqtt_payload),
+                     "{\"light_value\":%d,\"voltage\":%.2f}",
+                     light_value, photoresistor_voltage);
+            mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_LIGHT, mqtt_payload);
 #else
-                        send_to_http_queue(&reqs[0], 0, 0);  // Non-critical sensor data, don't wait
-            //xQueueSend(http_request_queue, &reqs[0], 0);
+            send_to_http_queue(&reqs[0], 0, 0);  // Non-critical sensor data, don't wait
 #endif
 
-
-
-
-			// Read RCWL-0516 sensor
-			// filter out false positives, if 4 out of 5 readings are high, consider it a motion
+            // Read RCWL-0516 sensor
+            // filter out false positives, if 4 out of 5 readings are high, consider it a motion
             for (int i = 0; i < 5; ++i) {
                 if (gpio_get_level(RCWL_GPIO) == 1) {
                     motion_count++;
@@ -1055,56 +1075,45 @@ static void second_loop_task(void *arg)
                 ESP_LOGI("RCWL", "🌫️ No motion.");
                 motion_count = 0; // reset count if no motion detected
             }
-                        snprintf(reqs[1].json_body, sizeof(reqs[1].json_body),
+            snprintf(reqs[1].json_body, sizeof(reqs[1].json_body),
                      "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"motion_detected\":%d}}",
                      sensors[5].id, device_id, motion_count >= 4 ? 1 : 0);
 #ifdef CONFIG_USE_MQTT
-                        snprintf(mqtt_payload, sizeof(mqtt_payload),
-                                 "{\"motion_detected\":%d}", motion_count >= 4 ? 1 : 0);
-                        mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_MOTION, mqtt_payload);
+            snprintf(mqtt_payload, sizeof(mqtt_payload),
+                     "{\"motion_detected\":%d}", motion_count >= 4 ? 1 : 0);
+            mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_MOTION, mqtt_payload);
 #else
-                        send_to_http_queue(&reqs[1], 0, 0);
-            //xQueueSend(http_request_queue, &reqs[1], 0);
+            send_to_http_queue(&reqs[1], 0, 0);
 #endif
 
-
-
-
-
-			int raw = 0;
-    		for (int i = 0; i < 64; ++i) {
-        		raw += adc1_get_raw(ACS712_ADC_CHANNEL);
-    		}
-			float voltage = (raw / 64.0) / 4095.0 * 5;
-			current = (voltage - zero_offset) / 0.185;
-			current = fabs(current);
-                        // through MQTT post current data
+            // Read ACS712 current sensor (average 64 samples)
+            int raw = 0, tmp;
+            for (int i = 0; i < 64; ++i) {
+                adc_oneshot_read(adc1_handle, ACS712_ADC_CHANNEL, &tmp);
+                raw += tmp;
+            }
+            float voltage = (raw / 64.0) / 4095.0 * 5;
+            current = (voltage - zero_offset) / 0.185;
+            current = fabs(current);
 #ifdef CONFIG_USE_MQTT
-                        snprintf(mqtt_payload, sizeof(mqtt_payload), "{\"current\":%.2f}", fabs(current));
-                        mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_CURRENT, mqtt_payload);
+            snprintf(mqtt_payload, sizeof(mqtt_payload), "{\"current\":%.2f}", fabs(current));
+            mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_CURRENT, mqtt_payload);
 #endif
             snprintf(reqs[2].json_body, sizeof(reqs[2].json_body),
                      "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"current\":%.2f}}",
                      sensors[4].id, device_id, current);
-            //send_to_http_queue(&reqs[2], 0, 0);
             xQueueSend(http_request_queue, &reqs[2], 0);
 
+            ESP_LOGI("ACS712", "Current: %.2f A", current);
 
-
-
-
-			ESP_LOGI("ACS712", "Current: %.2f A", current);
-
-
-			esp_err_t res = dht_read_float_data(DHT_TYPE_DHT11, DHT_GPIO, &humidity, &temperature);
-       		if (res == ESP_OK) {
+            esp_err_t res = dht_read_float_data(DHT_TYPE_DHT11, DHT_GPIO, &humidity, &temperature);
+            if (res == ESP_OK) {
                 // this DHT11 sensor has a error in temperature reading, so we need to adjust it
                 humidity= humidity*0.375+25.0f;  //old
                 temperature = temperature -30.0f;
 
-            	ESP_LOGI("DHT", "🌡️ Temperature: %.1f°C, 💧 Humidity: %.1f%%", temperature, humidity);
-                	// Post temperature and humidity data to cloud
-                // is one sensor but send two data to different sensors
+                ESP_LOGI("DHT", "🌡️ Temperature: %.1f°C, 💧 Humidity: %.1f%%", temperature, humidity);
+                // Post temperature and humidity data to cloud
                 snprintf(reqs[3].json_body, sizeof(reqs[3].json_body),
                         "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"temperature\":%.1f}}",
                         sensors[0].id, device_id, temperature);
@@ -1117,19 +1126,14 @@ static void second_loop_task(void *arg)
                 snprintf(mqtt_payload, sizeof(mqtt_payload), "{\"humidity\":%.1f}", humidity);
                 mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_HUMIDITY, mqtt_payload);
 #else
-                //send_to_http_queue(&reqs[3], 0, 0);
-                //send_to_http_queue(&reqs[4], 0, 0);
                 xQueueSend(http_request_queue, &reqs[3], 0);
                 xQueueSend(http_request_queue, &reqs[4], 0);
 #endif
-
-        	}
+            }
         }
-
 
         // Read soil moisture sensor value every 3 seconds (500 ticks*6)
         if (++soil_read_counter >= 3) {
-
             // Read soil moisture with improved validation
             moisture = read_soil_sensor();
 
@@ -1213,12 +1217,8 @@ static void second_loop_task(void *arg)
 
             soil_read_counter = 0; // Reset counter after reading
         }
-
-
-
-
-
     }
+    // Do not call adc_oneshot_del_unit(adc1_handle) here, global handle reused.
 }
 
 static void process_arduino_data(const char *data) {

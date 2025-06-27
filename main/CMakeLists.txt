@@ -22,7 +22,7 @@ idf_component_register(
         mbedtls
         mqtt
         dht
-
+        esp_adc
         EMBED_TXTFILES "certs/ca_cert.pem"
 
 )
