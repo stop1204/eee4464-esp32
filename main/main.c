@@ -236,14 +236,14 @@ void http_request_task(void *arg) {
 
     http_request_t req;
     int consecutive_failures = 0;
-    esp_task_wdt_add(NULL);
+    // esp_task_wdt_add(NULL);
 
     while (1) {
 
         // Only wait 5 seconds maximum to check queue status periodically
         if (xQueueReceive(http_request_queue, &req, pdMS_TO_TICKS(5000)) == pdTRUE) {
 
-            esp_task_wdt_reset();
+            // esp_task_wdt_reset();
             ESP_LOGI("HTTP_REQUEST", "Processing request to %s", req.endpoint);
 
             // Process control requests first with proper method (PUT for controls)
@@ -710,7 +710,10 @@ static void IRAM_ATTR test_button_isr_handler(void* arg) {
         last_button_time = current_time;
         BaseType_t xHigherPriorityTaskWoken = pdFALSE;
         xTaskNotifyFromISR(button_task_handle, 0, eNoAction, &xHigherPriorityTaskWoken);
-        ESP_LOGI("test_button","Button ISR triggered\n");
+
+        // ESP_LOGI("test_button","Button ISR triggered\n");
+        // do not print anything in ISR, it will cause stack overflow
+
         if (xHigherPriorityTaskWoken) {
             portYIELD_FROM_ISR();
         }
@@ -768,13 +771,15 @@ void init(void)
     gpio_reset_pin(TEST_BUTTON_GPIO);
     // Configure test button as input with pull-up and negedge interrupt
     gpio_config_t test_button_conf = {
+        .intr_type = GPIO_INTR_NEGEDGE,
         .pin_bit_mask = 1ULL << TEST_BUTTON_GPIO,
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_NEGEDGE
+        .pull_down_en = GPIO_PULLDOWN_DISABLE
     };
     gpio_config(&test_button_conf);
+    gpio_install_isr_service(0);
+
     gpio_isr_handler_add(TEST_BUTTON_GPIO, test_button_isr_handler, NULL);
 
     // Already configured via gpio_config_t, do not override
@@ -1167,12 +1172,9 @@ static void second_loop_task(void *arg)
                 snprintf(req1.json_body, sizeof(req1.json_body),
                         "{\"sensor_id\":%d,\"device_id\":%d,\"data\":%s}",
                         sensors[2].id, device_id, soil_data);
-#ifdef CONFIG_USE_MQTT
+                // MQTT publish for soil moisture
                 snprintf(mqtt_payload, sizeof(mqtt_payload), "{\"moisture\":%d}", moisture);
                 mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_MOISTURE, mqtt_payload);
-#else
-                send_to_http_queue(&req1, 0, pdMS_TO_TICKS(50));
-#endif
 
                 char control_url[50];
                 snprintf(control_url, sizeof(control_url),
@@ -1223,12 +1225,9 @@ static void second_loop_task(void *arg)
                 snprintf(req4.json_body, sizeof(req4.json_body),
                         "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"pump_state\":%d}}",
                         sensors[3].id, device_id, pump_on ? 1 : 0);
-#ifdef CONFIG_USE_MQTT
+                // MQTT publish for pump state
                 snprintf(mqtt_payload, sizeof(mqtt_payload), "{\"pump_state\":%d}", pump_on ? 1 : 0);
                 mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_PUMP, mqtt_payload);
-#else
-                send_to_http_queue(&req4, 0, pdMS_TO_TICKS(50));
-#endif
             } else {
                 ESP_LOGW("Soil Moisture Sensor", "Invalid moisture value: %d - skipping this reading", moisture);
             }
@@ -1240,6 +1239,8 @@ static void second_loop_task(void *arg)
 }
 
 static void process_arduino_data(const char *data) {
+    extern esp_mqtt_client_handle_t mqtt_client;
+    static char mqtt_payload[64];
     // ESP_LOGI("UART", "Received: %s", data);
     // if data include 'hr' then parse it as heart rate
     // data:  {"hr":65}
@@ -1260,7 +1261,9 @@ static void process_arduino_data(const char *data) {
                      "{\"sensor_id\":%d,\"device_id\":%d,\"data\":{\"heart_rate\":%d}}",
                      sensors[7].id, device_id, heart);
             send_to_http_queue(&req1, 0, pdMS_TO_TICKS(50));
-
+            // MQTT publish for heart rate
+            snprintf(mqtt_payload, sizeof(mqtt_payload), "{\"heart_rate\":%d}", heart);
+            mqtt_publish_sensor(mqtt_client, MQTT_TOPIC_HEART_RATE, mqtt_payload);
         }
     }
     cJSON_Delete(root);
