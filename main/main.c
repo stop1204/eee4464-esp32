@@ -90,6 +90,15 @@
 #define MQTT_TOPIC_MOTION      "iot/motion"
 #define MQTT_TOPIC_HEART_RATE  "iot/heart_rate"
 #define MQTT_TOPIC_CURRENT     "iot/current"
+/*
+Topic: iot/current {"current":0.29}
+Topic: iot/humidity {"humidity":61.0}
+Topic: iot/light {"light_value":2545,"voltage":2.05}
+Topic: iot/motion {"motion_detected":0}
+Topic: iot/temperature {"temperature":28.0}
+Topic: iot/humidity {"humidity":61.0}
+
+ */
 
 static TaskHandle_t button_task_handle = NULL;
 
@@ -691,11 +700,29 @@ void init_time() {
     esp_sntp_init();
 }
 
+// Improved test button interrupt handler with debouncing
+static void IRAM_ATTR test_button_isr_handler(void* arg) {
+    static uint32_t last_button_time = 0;
+    uint32_t current_time = xTaskGetTickCountFromISR();
+
+    // Simple debounce - ignore interrupts that come too quickly after each other
+    if ((current_time - last_button_time) >= pdMS_TO_TICKS(300)) {
+        last_button_time = current_time;
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        xTaskNotifyFromISR(button_task_handle, 0, eNoAction, &xHigherPriorityTaskWoken);
+        ESP_LOGI("test_button","Button ISR triggered\n");
+        if (xHigherPriorityTaskWoken) {
+            portYIELD_FROM_ISR();
+        }
+    }
+}
+
 void init(void)
 {
 
     gpio_reset_pin(LED_STATUS_GPIO);
     gpio_reset_pin(RCWL_GPIO);
+
     gpio_set_direction(LED_STATUS_GPIO, GPIO_MODE_OUTPUT);
     snprintf(url_control, sizeof(url_control), "/api/controls?device_id=%d", device_id);
 
@@ -748,6 +775,8 @@ void init(void)
         .intr_type = GPIO_INTR_NEGEDGE
     };
     gpio_config(&test_button_conf);
+    gpio_isr_handler_add(TEST_BUTTON_GPIO, test_button_isr_handler, NULL);
+
     // Already configured via gpio_config_t, do not override
 
     // microwave radar sensor config.
@@ -760,6 +789,7 @@ void init(void)
     };
     adc_oneshot_new_unit(&init_config, &adc1_handle);
 }
+
 void end(void)
 {
     for (int i = 10; i >= 0; i--) {
@@ -771,8 +801,9 @@ void end(void)
     esp_restart();
 }
 
-
 // Improved button task with robust HTTP request handling and retry logic
+
+
 void button_task(void* arg) {
     ESP_LOGI("button_task", "Stack high-water mark at start: %u words",
              uxTaskGetStackHighWaterMark(NULL));
@@ -836,24 +867,11 @@ void button_task(void* arg) {
     }
 }
 
-// Improved test button interrupt handler with debouncing
-static void IRAM_ATTR test_button_isr_handler(void* arg) {
-    static uint32_t last_button_time = 0;
-    uint32_t current_time = xTaskGetTickCountFromISR();
-
-    // Simple debounce - ignore interrupts that come too quickly after each other
-    if ((current_time - last_button_time) >= pdMS_TO_TICKS(300)) {
-        last_button_time = current_time;
-        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-        xTaskNotifyFromISR(button_task_handle, 0, eNoAction, &xHigherPriorityTaskWoken);
-        if (xHigherPriorityTaskWoken) {
-            portYIELD_FROM_ISR();
-        }
-    }
-}
-
 // Helper to setup test button interrupt
-static void setup_test_button_interrupt(void) {
+// 27/6/2025 disabled this function, as it is not used in the current code
+
+
+static void _setup_test_button_interrupt(void) {
     gpio_config_t io_conf = {
         .intr_type = GPIO_INTR_NEGEDGE,
         .mode = GPIO_MODE_INPUT,
@@ -985,7 +1003,7 @@ static void second_loop_task(void *arg)
     float humidity = 0;
     // initialize test button task
     xTaskCreate(button_task, "button_task", BUTTON_TASK_STACK, NULL, 10, &button_task_handle);
-    setup_test_button_interrupt();
+    // _setup_test_button_interrupt();
     // Use global adc1_handle for soil sensor, create a local handle for other ADC channels if needed
     // Config for photoresistor
     adc_oneshot_chan_cfg_t photo_cfg = {
