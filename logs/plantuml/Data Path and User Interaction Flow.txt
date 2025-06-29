@@ -1,0 +1,26 @@
+@startuml
+title Data Path and User Interaction Flow
+
+start
+:Sensors collect data (DHT11, LDR, ACS712, RCWL-0516, Soil Moisture);
+:Arduino Uno reads MAX30102 heart rate data;
+:Arduino sends heart rate JSON to ESP32 via UART;
+
+:ESP32 aggregates sensor data;
+fork
+  :Publish sensor data via MQTT to Cloudflare;
+fork again
+  :Send HTTP requests for control and additional data;
+end fork
+
+:Cloudflare Worker receives and processes data;
+:Cloudflare stores data in database;
+
+:Web Dashboard queries Cloudflare for real-time and historical data;
+:User views data and sends control commands via web interface;
+
+:Control commands sent from Cloudflare to ESP32;
+:ESP32 processes commands and activates relay or adjusts actuators;
+
+stop
+@enduml
