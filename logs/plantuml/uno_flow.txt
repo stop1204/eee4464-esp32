@@ -1,13 +1,16 @@
 @startuml
 start
 :setup();
-:initialize Serial and MAX30102;
 repeat
-  :read IR value;
-  if (checkForBeat?) then (yes)
-    :compute BPM;
-    :update average BPM;
-    :sendDataToESP32(average);
+  :read IR value from MAX30102 sensor;
+  if (checkForBeat(ir)?) then (yes)
+    :calculate BPM from time interval;
+    :store BPM in history;
+    :compute average BPM;
+    :send average BPM to ESP32 via Serial;
   endif
+
+  :handle IR remote commands;
+  :update lighting states accordingly;
 repeat while (true)
 @enduml
