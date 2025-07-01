@@ -52,4 +52,4 @@ Ensure the ESP32 is connected and try running `make port` again or specify the p
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
 ## Contact
-Terry He & Karen - <230263367@stu.vtc.edu.hk.com>
+Terry He & Karen - <230263367@stu.vtc.edu.hk>
