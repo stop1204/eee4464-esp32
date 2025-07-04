@@ -17,7 +17,7 @@ idf_component_register(
         log
         nvs_flash
         json
-        esp_driver_tsens
+#        esp_driver_tsens
         console
         mbedtls
         mqtt

@@ -42,7 +42,7 @@ flash:
 f: flash
 # 4. Initialize ESP-IDF environment
 init:
-	. $(HOME)/esp/esp-idf/export.sh; idf.py set-target esp32
+	. $(HOME)/esp/esp-idf-v5.2/export.sh; idf.py set-target esp32
 
 i: init
 
